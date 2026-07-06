@@ -44,20 +44,22 @@ impl From<SearchError> for AlignmentError {
 }
 
 /// Type representing the count of tokens (e.g., in a marking)
+///
+/// May be changed to larger types if Petri nets with more than 255 tokens in a place should be supported.
 pub type TokenCount = u8;
 
 /// Type representing trace position
 pub type TracePos = u16;
 
-/// An edge/step of the Petri-net search: the transition fired, and whether it was a log move.
+/// An edge/step of the Petri-net search: the transition fired, and whether it is a log move.
 ///
 /// The log-move-flag allows for log-before-model-moves pruning in [`PetriNetAlignment::expand`].
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct PetriNetStep {
     /// Index of the fired transition in the sync. prod. net
     transition: u32,
-    /// Whether the fired transition was a log move
-    was_log_move: bool,
+    /// Whether the fired transition is a log move
+    log_move: bool,
 }
 
 /// Reusable state storage for a Petri-net alignment search
@@ -136,19 +138,24 @@ impl<'a> PetriNetAlignment<'a> {
     }
 }
 
+/// Instantiate the search problem ([`SearchProblem`]) for the Petri net alignment
 impl SearchProblem for PetriNetAlignment<'_> {
+    /// A single step in the search corresponds to firing a sync net transition, represented by [`PetriNetStep`].
     type Step = PetriNetStep;
+    /// Costs are represented as `u32`, also see [`super::cost::CostFunction`]
     type Cost = u32;
 
+    /// Reset the search space and return the initial node ID (0)
     fn initial(&mut self) -> NodeID {
         self.space.reset(self.net);
         0
     }
-
+    /// Get maximal edge cost in the synchronous product net (needed for bucket setup)
     fn max_edge_cost(&self) -> u32 {
         self.net.max_edge_cost
     }
 
+    /// Check whether the given node is a goal state (final marking and trace position at the end of the trace)
     #[inline]
     fn is_goal(&self, node: NodeID) -> bool {
         let np = self.net.num_model_places;
@@ -157,6 +164,7 @@ impl SearchProblem for PetriNetAlignment<'_> {
             && self.space.markings[off..off + np] == self.net.final_marking[..np]
     }
 
+    /// Expand the given node, emitting all reachable nodes and their costs via the `emit` callback
     #[inline]
     fn expand<F: FnMut(NodeID, bool, u32, PetriNetStep)>(
         &mut self,
@@ -169,7 +177,7 @@ impl SearchProblem for PetriNetAlignment<'_> {
         let np = space.num_places;
         let off = node as usize * np;
         let trace_pos = space.trace_pos[node as usize];
-        let last_move_was_log = via.is_some_and(|s| s.was_log_move);
+        let last_move_was_log = via.is_some_and(|s| s.log_move);
         space
             .current
             .copy_from_slice(&space.markings[off..off + np]);
@@ -203,7 +211,7 @@ impl SearchProblem for PetriNetAlignment<'_> {
             };
             let step = PetriNetStep {
                 transition: trans_idx as u32,
-                was_log_move: matches!(trans.move_type, AlignmentMove::LogMove { .. }),
+                log_move: matches!(trans.move_type, AlignmentMove::LogMove { .. }),
             };
 
             let cost = trans.cost;
