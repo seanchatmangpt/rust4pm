@@ -440,7 +440,7 @@ fn get_e2o_ids(ocel: &SlimLinkedOCEL, ev_id: &String) -> Option<Vec<String>> {
 fn get_o2o_ids(ocel: &SlimLinkedOCEL, ob_id: &String) -> Option<Vec<String>> {
     ocel.get_ob_by_id(ob_id).map(|ob| {
         ob.get_o2o(ocel)
-            .map(|ev| ocel.get_ob_id(ev).to_string())
+            .map(|target_ob| ocel.get_ob_id(target_ob).to_string())
             .collect()
     })
 }

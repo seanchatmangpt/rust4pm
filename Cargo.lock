@@ -1540,6 +1540,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -2139,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "macros_process_mining"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3107,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "process_mining"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -3117,7 +3122,7 @@ dependencies = [
  "duckdb",
  "flate2",
  "graphviz-rust",
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
  "inventory",
  "itertools 0.14.0",
  "kuzu",
@@ -3130,6 +3135,7 @@ dependencies = [
  "rand 0.9.4",
  "rayon",
  "rusqlite",
+ "rustc-hash 2.1.2",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -3265,7 +3271,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "r4pm"
-version = "0.5.5"
+version = "0.6.0"
 dependencies = [
  "anstyle",
  "process_mining",
