@@ -23,6 +23,11 @@ pub struct AggregatedEventTimestamps {
     pub events_per_timestamp: HashMap<i64, HashMap<String, usize>>,
     /// All distinct activity names found in the log.
     pub activities: Vec<String>,
+    /// Width of each equal-width bin, in milliseconds.
+    /// Each bin has their center as key, so a bar then spans
+    /// `[center - bin_width_ms / 2, center + bin_width_ms / 2)`.
+    /// Empty bins might be omitted.
+    pub bin_width_ms: i64,
 }
 
 /// Options for [`get_event_timestamps`].
@@ -88,6 +93,7 @@ pub fn get_event_timestamps(
         return AggregatedEventTimestamps {
             events_per_timestamp: HashMap::default(),
             activities: activities.into_iter().cloned().collect(),
+            bin_width_ms: 1,
         };
     };
     let bin_size = (max - min) as f64 / num_bins as f64;
@@ -106,5 +112,6 @@ pub fn get_event_timestamps(
     AggregatedEventTimestamps {
         events_per_timestamp: ev_counts,
         activities: activities.into_iter().cloned().collect(),
+        bin_width_ms: (bin_size.round() as i64).max(1),
     }
 }
