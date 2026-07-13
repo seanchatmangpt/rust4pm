@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
-- Optimal alignments (`conformance::alignments`):
+- Optimal Petri net alignments (`conformance::alignments`):
   - `align_log` / `align_projection` / `align_trace` / `align_empty_trace` compute cost-optimal alignments via Dijkstra over a synchronous product net
   - `compute_fitness` derives log/trace fitness for pre-computed alignments
   - Configurable `AlignmentOptions` (`CostFunction`, `max_states`)

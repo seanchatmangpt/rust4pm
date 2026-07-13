@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "macros_process_mining"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3112,7 +3112,7 @@ dependencies = [
 
 [[package]]
 name = "process_mining"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -3271,7 +3271,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "r4pm"
-version = "0.5.6"
+version = "0.6.0"
 dependencies = [
  "anstyle",
  "process_mining",
