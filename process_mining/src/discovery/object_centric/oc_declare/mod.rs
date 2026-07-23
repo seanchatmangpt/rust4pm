@@ -759,6 +759,7 @@ pub fn project_oc_arcs_naive(
 /// arc types and labels along the way; whenever the search reaches another target,
 /// the composed arc is emitted. Dominated duplicates are pruned and the result is
 /// passed through transitive reduction.
+#[register_binding(name = "project_oc_declare_arcs")]
 pub fn project_oc_arcs_smart(
     arcs: Vec<OCDeclareArc>,
     activities: &HashSet<String>,
