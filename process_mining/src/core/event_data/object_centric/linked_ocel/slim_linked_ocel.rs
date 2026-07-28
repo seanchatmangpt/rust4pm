@@ -19,11 +19,10 @@ use uuid::Uuid;
 use crate::{
     core::{
         event_data::object_centric::{
-            appendable::AppendableOCEL,
+            appendable::{is_streaming_format, AppendableOCEL, StreamImportOCEL},
             io::OCELIOError,
             linked_ocel::LinkedOCELAccess,
-            ocel_json::import_ocel_json_into,
-            ocel_xml::xml_ocel_import::{import_ocel_xml_into, OCELImportOptions},
+            ocel_xml::xml_ocel_import::OCELImportOptions,
             readable::{OCELLookup, ReadableOCEL},
             OCELAttributeType, OCELAttributeValue, OCELEvent, OCELEventAttribute, OCELObject,
             OCELObjectAttribute, OCELRelationship, OCELType, OCELTypeAttribute,
@@ -604,6 +603,19 @@ impl SlimLinkedOCEL {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Build a `SlimLinkedOCEL` from a `DuckDB` schema database (as written by
+    /// [`stream_ocel_file_to_duckdb`](crate::core::event_data::object_centric::ocel_sql::stream_ocel_file_to_duckdb)).
+    /// Eager: the whole log is loaded into memory; for out-of-core access use
+    /// `DuckDbLinkedOCEL`.
+    #[cfg(feature = "ocel-duckdb")]
+    pub fn from_duckdb(con: &duckdb::Connection) -> Result<Self, OCELIOError> {
+        use crate::core::event_data::object_centric::ocel_sql::duckdb::schema::reader::DuckDbReadInto;
+        let mut slim = SlimLinkedOCEL::new();
+        slim.read_from_duckdb(con)?;
+        Ok(slim)
+    }
+
     /// Convert an unlinked [`OCEL`] to a [`SlimLinkedOCEL`].
     ///
     /// Events are sorted by time before insertion so that `events_per_type` lists are
@@ -1741,27 +1753,17 @@ impl Importable for SlimLinkedOCEL {
         format: &str,
         _: Self::ImportOptions,
     ) -> Result<Self, Self::Error> {
-        if let Some(inner) = format.strip_suffix(".gz") {
-            // Buffer the compressed bytes; `GzDecoder` reads from its inner in chunks.
-            let gz: Box<dyn Read> = Box::new(flate2::read::GzDecoder::new(
-                std::io::BufReader::new(reader),
-            ));
-            return Self::import_from_reader_with_options(gz, inner, ());
-        }
-        if format.ends_with("xml") || format.ends_with("xmlocel") {
-            let mut xml_reader = quick_xml::Reader::from_reader(std::io::BufReader::new(reader));
+        if is_streaming_format(format) {
+            // If supported, stream straight into a fresh SlimLinkkedOCEL,
+            // otherwise fall back to materializing `OCEL` importer.
             let mut slim = SlimLinkedOCEL::new();
-            import_ocel_xml_into(&mut xml_reader, &mut slim, OCELImportOptions::default())?;
-            slim.finalize()?;
-            Ok(slim)
-        } else if format.ends_with("json") || format.ends_with("jsonocel") {
-            let mut slim = SlimLinkedOCEL::new();
-            import_ocel_json_into(std::io::BufReader::new(reader), &mut slim)?;
+            slim.stream_ocel_from_reader(reader, format, OCELImportOptions::default())?;
             slim.finalize()?;
             Ok(slim)
         } else {
-            let ocel = OCEL::import_from_reader(reader, format)?;
-            Ok(SlimLinkedOCEL::from_ocel(ocel))
+            Ok(SlimLinkedOCEL::from_ocel(OCEL::import_from_reader(
+                reader, format,
+            )?))
         }
     }
 

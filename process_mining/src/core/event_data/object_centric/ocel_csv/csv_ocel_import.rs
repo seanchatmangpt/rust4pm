@@ -196,15 +196,7 @@ fn json_to_value(v: &serde_json::Value) -> OCELAttributeValue {
 
 /// Coalesce two types: same->same, null + x ->x, int + float -> float, other combination -> string
 fn coalesce(t1: OCELAttributeType, t2: OCELAttributeType) -> OCELAttributeType {
-    use OCELAttributeType::*;
-    if t1 == t2 {
-        return t1;
-    }
-    match (t1, t2) {
-        (Null, other) | (other, Null) => other,
-        (Integer, Float) | (Float, Integer) => Float,
-        _ => String,
-    }
+    t1.coalesce(t2)
 }
 
 /// Convert value to target type (mainly int -> float or any -> string)

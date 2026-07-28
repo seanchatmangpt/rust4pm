@@ -31,6 +31,11 @@ pub use duckdb::duckdb_ocel_export::export_ocel_duckdb_to_path;
 pub use duckdb::duckdb_ocel_import::import_ocel_duckdb_from_con;
 #[cfg(feature = "ocel-duckdb")]
 pub use duckdb::duckdb_ocel_import::import_ocel_duckdb_from_path;
+#[cfg(feature = "ocel-duckdb")]
+pub use duckdb::{
+    generate_type_views, read_ocel_from_duckdb, stream_ocel_file_to_duckdb,
+    stream_ocel_file_to_duckdb_with, DuckDbImportOptions,
+};
 
 #[cfg(feature = "ocel-sqlite")]
 pub use sqlite::sqlite_ocel_export::export_ocel_sqlite_to_path;

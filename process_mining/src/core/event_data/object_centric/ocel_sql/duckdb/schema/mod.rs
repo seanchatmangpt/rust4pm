@@ -1,0 +1,15 @@
+//! `DuckDB` OCEL schema (fixed tables; EAV object attributes): streaming import + on-demand wide views.
+pub(crate) mod reader;
+pub(crate) mod sink;
+#[cfg(feature = "ocel-sqlite")]
+pub(crate) mod sqlite_source;
+pub(crate) mod stream;
+pub(crate) mod tables;
+pub(crate) mod value;
+pub(crate) mod views;
+
+pub use reader::read_ocel_from_duckdb;
+pub use stream::{
+    stream_ocel_file_to_duckdb, stream_ocel_file_to_duckdb_with, DuckDbImportOptions,
+};
+pub use views::generate_type_views;

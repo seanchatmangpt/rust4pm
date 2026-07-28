@@ -1,5 +1,12 @@
 pub(crate) mod duckdb_ocel_export;
 pub(crate) mod duckdb_ocel_import;
+pub(crate) mod schema;
+
+#[cfg(feature = "ocel-duckdb")]
+pub use schema::{
+    generate_type_views, read_ocel_from_duckdb, stream_ocel_file_to_duckdb,
+    stream_ocel_file_to_duckdb_with, DuckDbImportOptions,
+};
 
 #[cfg(test)]
 mod duckdb_tests {

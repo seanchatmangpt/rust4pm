@@ -1,12 +1,20 @@
 //! Appendable OCEL trait
 use std::convert::Infallible;
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::path::Path;
 
 use chrono::{DateTime, FixedOffset};
 
+use crate::core::event_data::object_centric::io::OCELIOError;
+use crate::core::event_data::object_centric::ocel_json::import_ocel_json_into;
 use crate::core::event_data::object_centric::ocel_struct::{
     OCELEvent, OCELEventAttribute, OCELObject, OCELObjectAttribute, OCELRelationship, OCELType,
     OCEL,
 };
+use crate::core::event_data::object_centric::ocel_xml::xml_ocel_import::import_ocel_xml_into;
+use crate::core::event_data::object_centric::ocel_xml::OCELImportOptions;
+use crate::core::io::infer_format_from_path;
 
 /// Appendable trait for OCEL data.
 ///
@@ -111,4 +119,62 @@ impl AppendableOCEL for OCEL {
         });
         Ok(())
     }
+}
+
+/// Streaming counterpart to [`Importable`](crate::Importable):
+/// Import an OCEL from a reader or path straight into an [`AppendableOCEL`] sink.
+pub trait StreamImportOCEL: AppendableOCEL + Sized {
+    /// Stream an OCEL from `reader` in the given `format` into this sink.
+    fn stream_ocel_from_reader<R: Read>(
+        &mut self,
+        reader: R,
+        format: &str,
+        options: OCELImportOptions,
+    ) -> Result<(), OCELIOError>
+    where
+        Self::Error: Into<OCELIOError>,
+    {
+        if let Some(inner) = format.strip_suffix(".gz") {
+            // Erase the reader type for recursion
+            let gz: Box<dyn Read> = Box::new(flate2::read::GzDecoder::new(BufReader::new(reader)));
+            return self.stream_ocel_from_reader(gz, inner, options);
+        }
+        if format.ends_with("json") || format.ends_with("jsonocel") {
+            import_ocel_json_into(BufReader::new(reader), self)
+        } else if format.ends_with("xml") || format.ends_with("xmlocel") {
+            let mut xml = quick_xml::Reader::from_reader(BufReader::new(reader));
+            import_ocel_xml_into(&mut xml, self, options)
+        } else {
+            Err(OCELIOError::UnsupportedFormat(format!(
+                "no streaming OCEL importer for format {format:?}"
+            )))
+        }
+    }
+
+    /// Infer the format from `path` and stream the file into this sink.
+    fn stream_ocel_from_path<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        options: OCELImportOptions,
+    ) -> Result<(), OCELIOError>
+    where
+        Self::Error: Into<OCELIOError>,
+    {
+        let path = path.as_ref();
+        let format = infer_format_from_path(path).ok_or_else(|| {
+            OCELIOError::UnsupportedFormat(format!("cannot infer OCEL format from {path:?}"))
+        })?;
+        self.stream_ocel_from_reader(File::open(path)?, &format, options)
+    }
+}
+
+impl<A: AppendableOCEL> StreamImportOCEL for A {}
+
+/// Whether streaming a given format directly is supported.
+pub fn is_streaming_format(format: &str) -> bool {
+    let base = format.strip_suffix(".gz").unwrap_or(format);
+    base.ends_with("json")
+        || base.ends_with("jsonocel")
+        || base.ends_with("xml")
+        || base.ends_with("xmlocel")
 }

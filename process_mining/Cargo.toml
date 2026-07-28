@@ -109,3 +109,12 @@ harness = false
 [[bench]]
 name = "alignments"
 harness = false
+
+[[bench]]
+name = "ocel_import"
+harness = false
+required-features = ["ocel-duckdb"]
+
+[[example]]
+name = "ocel_stream_to_duckdb"
+required-features = ["ocel-duckdb"]

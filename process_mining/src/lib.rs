@@ -33,7 +33,7 @@ pub use core::{EventLog, PetriNet, OCEL};
 
 // Re-export OCEL backend traits and the streaming entry points.
 pub use core::event_data::object_centric::{
-    appendable::AppendableOCEL,
+    appendable::{AppendableOCEL, StreamImportOCEL},
     ocel_json::import_ocel_json_into,
     ocel_xml::xml_ocel_import::{import_ocel_xml_into, OCELImportOptions},
     readable::{OCELLookup, ReadableOCEL},
