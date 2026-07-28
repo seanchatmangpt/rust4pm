@@ -6,10 +6,12 @@ use duckdb::Connection;
 
 use crate::core::event_data::object_centric::appendable::AppendableOCEL;
 use crate::core::event_data::object_centric::io::OCELIOError;
+use crate::core::event_data::object_centric::linked_ocel::SlimLinkedOCEL;
 use crate::core::event_data::object_centric::ocel_struct::{
     OCELEventAttribute, OCELObjectAttribute, OCELRelationship, OCELType, OCELTypeAttribute, OCEL,
 };
 use crate::core::event_data::timestamp_utils::parse_timestamp;
+use macros_process_mining::register_binding;
 
 use super::value::{duck_timestamp_to_datetime, duck_value_to_ocel, from_sql_value};
 
@@ -29,6 +31,32 @@ pub fn read_ocel_from_duckdb(con: &Connection) -> Result<OCEL, OCELIOError> {
     };
     ocel.read_from_duckdb(con)?;
     Ok(ocel)
+}
+
+/// Read an [`OCEL`] from a `DuckDB` database file in the consolidated schema, i.e. one written by
+/// [`stream_ocel_file_to_duckdb`](super::stream::stream_ocel_file_to_duckdb).
+///
+/// Databases in the per-type table layout of the OCEL 2.0 standard are read by
+/// [`import_ocel_duckdb_from_path`](crate::core::event_data::object_centric::ocel_sql::import_ocel_duckdb_from_path)
+/// instead.
+#[register_binding(name = "read_consolidated_ocel_from_duckdb", stringify_error)]
+pub fn read_consolidated_ocel_from_duckdb_path(
+    db_path: impl AsRef<std::path::Path>,
+) -> Result<OCEL, OCELIOError> {
+    let con = Connection::open(db_path)?;
+    read_ocel_from_duckdb(&con)
+}
+
+/// Read a [`SlimLinkedOCEL`] from a `DuckDB` database file in the consolidated schema, i.e. one
+/// written by [`stream_ocel_file_to_duckdb`](super::stream::stream_ocel_file_to_duckdb).
+///
+/// Rows are read into the linked structure directly, without building an [`OCEL`] first.
+#[register_binding(name = "read_consolidated_slim_ocel_from_duckdb", stringify_error)]
+pub fn read_consolidated_slim_ocel_from_duckdb_path(
+    db_path: impl AsRef<std::path::Path>,
+) -> Result<SlimLinkedOCEL, OCELIOError> {
+    let con = Connection::open(db_path)?;
+    SlimLinkedOCEL::from_duckdb(&con)
 }
 
 /// Read a `DuckDB` schema database into any [`AppendableOCEL`] sink.

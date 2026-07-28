@@ -330,15 +330,17 @@ pub fn register_binding(args: TokenStream, item: TokenStream) -> TokenStream {
     // 4. Generate the Execution Logic
     let extractions: Vec<_> = extractions.collect();
 
+    // Apply error handling if requested, independent of whether the return type is a big type or not.
+    let error_handling = if attrs.stringify_error && !attrs.debug_output {
+        quote! { let result = result.map_err(|e| e.to_string())?; }
+    } else {
+        quote! {}
+    };
+
     let serialization_logic = if attrs.debug_output {
         quote! {
             let final_result = format!("{:?}", result);
             ::process_mining::__rt::serde_json::to_vec(&final_result).map_err(|e| e.to_string())
-        }
-    } else if attrs.stringify_error {
-        quote! {
-            let ok_result = result.map_err(|e| e.to_string())?;
-            ::process_mining::__rt::serde_json::to_vec(&ok_result).map_err(|e| e.to_string())
         }
     } else {
         quote! {
@@ -417,6 +419,7 @@ pub fn register_binding(args: TokenStream, item: TokenStream) -> TokenStream {
             let mut __state_guard = state_lock.items.write().map_err(|e| e.to_string())?;
             #(#mut_extractions)*
             let result = #fn_ident( #(#call_args),* );
+            #error_handling
             #mut_serialization
         }
     } else if let Some(type_name) = is_big_type(&ret_type) {
@@ -427,6 +430,7 @@ pub fn register_binding(args: TokenStream, item: TokenStream) -> TokenStream {
                 let state = &*state_guard;
                 #fn_ident( #(#extractions),* )
             };
+            #error_handling
             let id = format!("res_{}", ::process_mining::__rt::uuid::Uuid::new_v4());
             state_lock.add(&id, ::process_mining::bindings::RegistryItem::#variant_ident(result));
             ::process_mining::__rt::serde_json::to_vec(&id).map_err(|e| e.to_string())
@@ -436,6 +440,7 @@ pub fn register_binding(args: TokenStream, item: TokenStream) -> TokenStream {
             let state_guard = state_lock.items.read().map_err(|e| e.to_string())?;
             let state = &*state_guard;
             let result = #fn_ident( #(#extractions),* );
+            #error_handling
             #serialization_logic
         }
     };
