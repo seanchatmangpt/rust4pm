@@ -727,7 +727,12 @@ fn compose_arc_labels(l1: &OCDeclareArcLabel, l2: &OCDeclareArcLabel) -> OCDecla
         l.any.iter().chain(&l.each).chain(&l.all).collect()
     }
 
-    let all: Vec<_> = l1.all.iter().filter(|x| l2.all.contains(x)).cloned().collect();
+    let all: Vec<_> = l1
+        .all
+        .iter()
+        .filter(|x| l2.all.contains(x))
+        .cloned()
+        .collect();
     let each: Vec<_> = at_least_each(l1)
         .intersection(&at_least_each(l2))
         .filter(|x| !all.contains(x))
@@ -766,9 +771,11 @@ pub fn project_oc_arcs_smart(
 ) -> Vec<OCDeclareArc> {
     let mut adj: HashMap<&str, Vec<(&str, &OCDeclareArcType, &OCDeclareArcLabel)>> = HashMap::new();
     for arc in &arcs {
-        adj.entry(arc.from.as_str())
-            .or_default()
-            .push((arc.to.as_str(), &arc.arc_type, &arc.label));
+        adj.entry(arc.from.as_str()).or_default().push((
+            arc.to.as_str(),
+            &arc.arc_type,
+            &arc.label,
+        ));
     }
     let is_target = |n: &str| activities.contains(n);
 
@@ -780,15 +787,16 @@ pub fn project_oc_arcs_smart(
         .collect();
 
     // Group outgoing edges of `node` by target, skipping self-loops back to `source`.
-    let group_outgoing = |node: &str, source: &str| -> HashMap<&str, Vec<(&OCDeclareArcType, &OCDeclareArcLabel)>> {
-        let mut out = HashMap::new();
-        for &(t, ty, lbl) in adj.get(node).into_iter().flatten() {
-            if t != source {
-                out.entry(t).or_insert_with(Vec::new).push((ty, lbl));
+    let group_outgoing =
+        |node: &str, source: &str| -> HashMap<&str, Vec<(&OCDeclareArcType, &OCDeclareArcLabel)>> {
+            let mut out = HashMap::new();
+            for &(t, ty, lbl) in adj.get(node).into_iter().flatten() {
+                if t != source {
+                    out.entry(t).or_insert_with(Vec::new).push((ty, lbl));
+                }
             }
-        }
-        out
-    };
+            out
+        };
 
     for source in activities {
         // For each visited non-target node, the set of non-dominated (type, label)
@@ -802,7 +810,10 @@ pub fn project_oc_arcs_smart(
                 continue; // direct target-target arc, already in `result`
             }
             let pairs = dedup_type_label_pairs(
-                edges.into_iter().map(|(ty, lbl)| (*ty, lbl.clone())).collect(),
+                edges
+                    .into_iter()
+                    .map(|(ty, lbl)| (*ty, lbl.clone()))
+                    .collect(),
             );
             known.insert(target, pairs.clone());
             frontier.push_back((target, pairs));
@@ -843,9 +854,9 @@ pub fn project_oc_arcs_smart(
                 let novel: Vec<TypeLabel> = composed
                     .into_iter()
                     .filter(|c| {
-                        !existing.iter().any(|e| {
-                            c.0.is_dominated_by_or_eq(&e.0) && c.1.is_dominated_by(&e.1)
-                        })
+                        !existing
+                            .iter()
+                            .any(|e| c.0.is_dominated_by_or_eq(&e.0) && c.1.is_dominated_by(&e.1))
                     })
                     .collect();
                 if novel.is_empty() {
