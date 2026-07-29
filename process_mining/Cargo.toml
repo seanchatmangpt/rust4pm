@@ -1,6 +1,6 @@
 [package]
 name = "process_mining"
-version = "0.5.6"
+version = "0.6.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Process Mining library for working with (object-centric) event data"
@@ -14,7 +14,7 @@ rust-version = "1.88"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-macros_process_mining = { version = "0.5.6", path = "../macros_process_mining" }
+macros_process_mining = { version = "0.6.0", path = "../macros_process_mining" }
 chrono = { version = "0.4.40", features = ["serde"] }
 duckdb = { version = "1.2.1", optional = true, features = ["chrono"]}
 flate2 = "1.1.1"
@@ -37,6 +37,8 @@ uuid = {version = "1.16.0", features = ["v4", "serde"]}
 schemars = { version = "1.1.0", features = ["chrono04", "uuid1"]}
 inventory = { version = "0.3", optional = true }
 csv = "1.4.0"
+hashbrown = "0.17.1"
+rustc-hash = "2.1.2"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
@@ -102,4 +104,8 @@ harness = false
 
 [[bench]]
 name = "load_events_mem"
+harness = false
+
+[[bench]]
+name = "alignments"
 harness = false
