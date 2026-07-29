@@ -6,7 +6,8 @@ pub(crate) mod schema;
 pub use schema::{
     generate_type_views, read_consolidated_ocel_from_duckdb_path,
     read_consolidated_slim_ocel_from_duckdb_path, read_ocel_from_duckdb,
-    stream_ocel_file_to_duckdb, stream_ocel_file_to_duckdb_with, DuckDbImportOptions,
+    stream_ocel_file_to_duckdb, stream_ocel_file_to_duckdb_with, write_ocel_to_duckdb,
+    write_ocel_to_duckdb_with, DuckDbImportOptions,
 };
 
 #[cfg(test)]

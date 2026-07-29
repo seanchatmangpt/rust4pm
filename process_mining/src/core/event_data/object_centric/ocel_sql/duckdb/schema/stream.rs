@@ -6,7 +6,10 @@ use duckdb::Connection;
 
 use crate::core::event_data::object_centric::appendable::{AppendableOCEL, StreamImportOCEL};
 use crate::core::event_data::object_centric::io::OCELIOError;
+use crate::core::event_data::object_centric::linked_ocel::SlimLinkedOCEL;
+use crate::core::event_data::object_centric::ocel_struct::OCEL;
 use crate::core::event_data::object_centric::ocel_xml::OCELImportOptions;
+use crate::core::event_data::object_centric::readable::ReadableOCEL;
 use crate::core::io::infer_format_from_path;
 use macros_process_mining::register_binding;
 use schemars::JsonSchema;
@@ -102,6 +105,63 @@ where
     con.execute_batch("CHECKPOINT")?;
     con.execute_batch("VACUUM")?;
     Ok(())
+}
+
+/// Write an in-memory OCEL into a fresh `DuckDB` database in the consolidated schema.
+///
+/// For writing the OCEL 2.0 standard per-type layout instead, see [`export_ocel_duckdb_to_path`](crate::core::event_data::object_centric::ocel_sql::export_ocel_duckdb_to_path).
+pub fn write_ocel_to_duckdb_with<O: ReadableOCEL + ?Sized>(
+    ocel: &O,
+    db_path: impl AsRef<Path>,
+    options: &DuckDbImportOptions,
+) -> Result<(), OCELIOError> {
+    run_import(db_path.as_ref(), options, |sink| {
+        for et in ocel.event_types() {
+            sink.declare_event_type(et.clone())?;
+        }
+        for ot in ocel.object_types() {
+            sink.declare_object_type(ot.clone())?;
+        }
+        for e in ocel.iter_events() {
+            let e = e.into_owned();
+            sink.append_event(e.id, &e.event_type, e.time, e.attributes, e.relationships)?;
+        }
+        for o in ocel.iter_objects() {
+            let o = o.into_owned();
+            sink.append_object(o.id, &o.object_type, o.attributes, o.relationships)?;
+        }
+        Ok(())
+    })
+}
+
+/// Write an in-memory OCEL into a fresh `DuckDB` database in the consolidated schema.
+///
+/// Like [`write_ocel_to_duckdb_with`] with default [`DuckDbImportOptions`].
+pub fn write_ocel_to_duckdb<O: ReadableOCEL + ?Sized>(
+    ocel: &O,
+    db_path: impl AsRef<Path>,
+) -> Result<(), OCELIOError> {
+    write_ocel_to_duckdb_with(ocel, db_path, &DuckDbImportOptions::default())
+}
+
+/// Write an in-memory OCEL into a fresh `DuckDB` database in the consolidated schema.
+#[register_binding(name = "write_ocel_to_consolidated_duckdb", stringify_error)]
+fn write_ocel_to_duckdb_binding(
+    ocel: &OCEL,
+    db_path: impl AsRef<Path>,
+    #[bind(default = Default::default())] options: &DuckDbImportOptions,
+) -> Result<(), OCELIOError> {
+    write_ocel_to_duckdb_with(ocel, db_path, options)
+}
+
+/// Write an in-memory Slim OCEL into a fresh `DuckDB` database in the consolidated schema.
+#[register_binding(name = "write_slim_ocel_to_consolidated_duckdb", stringify_error)]
+fn write_slim_ocel_to_duckdb_binding(
+    ocel: &SlimLinkedOCEL,
+    db_path: impl AsRef<Path>,
+    #[bind(default = Default::default())] options: &DuckDbImportOptions,
+) -> Result<(), OCELIOError> {
+    write_ocel_to_duckdb_with(ocel, db_path, options)
 }
 
 /// Stream an OCEL file into a fresh `DuckDB` database, dispatching by extension: `.json`,
