@@ -223,75 +223,70 @@ where
     let mut has_object_or_event_types_decl = false;
 
     loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(r) => {
-                match r {
-                    quick_xml::events::Event::Start(t) => match current_mode {
-                        Mode::None if t.name().as_ref() == b"log" => {
-                            current_mode = Mode::Log;
-                        }
-                        Mode::Log => match t.name().as_ref() {
-                            b"object-types" => {
-                                current_mode = Mode::ObjectTypes;
-                                has_object_or_event_types_decl = true;
-                            }
-                            b"event-types" => {
-                                current_mode = Mode::EventTypes;
-                                has_object_or_event_types_decl = true;
-                            }
-                            b"objects" => current_mode = Mode::Objects,
-                            b"events" => current_mode = Mode::Events,
-                            _ => {}
-                        },
-                        Mode::ObjectTypes if t.name().as_ref() == b"object-type" => {
-                            let name = get_attribute_value(&t, "name")?;
-                            current_ob_type = Some(OCELType {
-                                name,
-                                attributes: Vec::new(),
-                            });
-                            current_mode = Mode::ObjectType;
-                        }
-                        Mode::ObjectType if t.name().as_ref() == b"attributes" => {
-                            current_mode = Mode::ObjectTypeAttributes;
-                        }
-                        Mode::EventType if t.name().as_ref() == b"attributes" => {
-                            current_mode = Mode::EventTypeAttributes;
-                        }
-                        Mode::EventTypes if t.name().as_ref() == b"event-type" => {
-                            let name = get_attribute_value(&t, "name")?;
-                            current_ev_type = Some(OCELType {
-                                name,
-                                attributes: Vec::new(),
-                            });
-                            current_mode = Mode::EventType;
-                        }
-                        Mode::Objects if t.name().as_ref() == b"object" => {
-                            let id = get_attribute_value(&t, "id")?;
-                            let object_type = get_attribute_value(&t, "type")?;
-                            current_object = Some(PartialObject {
-                                id,
-                                object_type,
-                                attributes: Vec::new(),
-                                relationships: Vec::new(),
-                            });
-                            current_mode = Mode::Object;
-                        }
-                        Mode::Object => match t.name().as_ref() {
-                            b"attributes" | b"objects" => {}
-                            b"attribute" => {
-                                append_object_attr_decl(&t, &mut current_object, &options)?;
-                            }
-                            _ => {}
-                        },
-                        Mode::Events if t.name().as_ref() == b"event" => {
-                            let id = get_attribute_value(&t, "id")?;
-                            let event_type = get_attribute_value(&t, "type")?;
-                            let time_str = get_attribute_value(&t, "time")?;
-                            let time = parse_timestamp(
-                                &time_str,
-                                options.date_format.as_deref(),
-                                options.verbose,
-                            )
+        match reader.read_event_into(&mut buf)? {
+            quick_xml::events::Event::Start(t) => match current_mode {
+                Mode::None if t.name().as_ref() == b"log" => {
+                    current_mode = Mode::Log;
+                }
+                Mode::Log => match t.name().as_ref() {
+                    b"object-types" => {
+                        current_mode = Mode::ObjectTypes;
+                        has_object_or_event_types_decl = true;
+                    }
+                    b"event-types" => {
+                        current_mode = Mode::EventTypes;
+                        has_object_or_event_types_decl = true;
+                    }
+                    b"objects" => current_mode = Mode::Objects,
+                    b"events" => current_mode = Mode::Events,
+                    _ => {}
+                },
+                Mode::ObjectTypes if t.name().as_ref() == b"object-type" => {
+                    let name = get_attribute_value(&t, "name")?;
+                    current_ob_type = Some(OCELType {
+                        name,
+                        attributes: Vec::new(),
+                    });
+                    current_mode = Mode::ObjectType;
+                }
+                Mode::ObjectType if t.name().as_ref() == b"attributes" => {
+                    current_mode = Mode::ObjectTypeAttributes;
+                }
+                Mode::EventType if t.name().as_ref() == b"attributes" => {
+                    current_mode = Mode::EventTypeAttributes;
+                }
+                Mode::EventTypes if t.name().as_ref() == b"event-type" => {
+                    let name = get_attribute_value(&t, "name")?;
+                    current_ev_type = Some(OCELType {
+                        name,
+                        attributes: Vec::new(),
+                    });
+                    current_mode = Mode::EventType;
+                }
+                Mode::Objects if t.name().as_ref() == b"object" => {
+                    let id = get_attribute_value(&t, "id")?;
+                    let object_type = get_attribute_value(&t, "type")?;
+                    current_object = Some(PartialObject {
+                        id,
+                        object_type,
+                        attributes: Vec::new(),
+                        relationships: Vec::new(),
+                    });
+                    current_mode = Mode::Object;
+                }
+                Mode::Object => match t.name().as_ref() {
+                    b"attributes" | b"objects" => {}
+                    b"attribute" => {
+                        append_object_attr_decl(&t, &mut current_object, &options)?;
+                    }
+                    _ => {}
+                },
+                Mode::Events if t.name().as_ref() == b"event" => {
+                    let id = get_attribute_value(&t, "id")?;
+                    let event_type = get_attribute_value(&t, "type")?;
+                    let time_str = get_attribute_value(&t, "time")?;
+                    let time =
+                        parse_timestamp(&time_str, options.date_format.as_deref(), options.verbose)
                             .map_err(|e| {
                                 OCELIOError::Xml(quick_xml::Error::Io(std::sync::Arc::new(
                                     std::io::Error::new(
@@ -300,178 +295,175 @@ where
                                     ),
                                 )))
                             })?;
-                            current_event = Some(PartialEvent {
-                                id,
-                                event_type,
-                                time,
-                                attributes: Vec::new(),
-                                relationships: Vec::new(),
-                            });
-                            current_mode = Mode::Event;
-                        }
-                        Mode::Event => match t.name().as_ref() {
-                            b"attributes" | b"objects" => {}
-                            b"attribute" => {
-                                append_event_attr_decl(&t, &mut current_event)?;
-                            }
-                            _ => {}
-                        },
-                        _ => {}
-                    },
-                    quick_xml::events::Event::End(t) => match current_mode {
-                        Mode::ObjectTypeAttributes if t.name().as_ref() == b"attributes" => {
-                            current_mode = Mode::ObjectType;
-                        }
-                        Mode::ObjectType if t.name().as_ref() == b"object-type" => {
-                            if let Some(ot) = current_ob_type.take() {
-                                ocel.declare_object_type(ot).map_err(Into::into)?;
-                            }
-                            current_mode = Mode::ObjectTypes;
-                        }
-                        Mode::ObjectTypes if t.name().as_ref() == b"object-types" => {
-                            current_mode = Mode::Log;
-                        }
-                        Mode::EventTypes if t.name().as_ref() == b"event-types" => {
-                            current_mode = Mode::Log;
-                        }
-                        Mode::EventType if t.name().as_ref() == b"event-type" => {
-                            if let Some(et) = current_ev_type.take() {
-                                ocel.declare_event_type(et).map_err(Into::into)?;
-                            }
-                            current_mode = Mode::EventTypes;
-                        }
-                        Mode::EventTypeAttributes if t.name().as_ref() == b"attributes" => {
-                            current_mode = Mode::EventType;
-                        }
-                        Mode::Log if t.name().as_ref() == b"log" => {
-                            current_mode = Mode::None;
-                        }
-                        Mode::Objects if t.name().as_ref() == b"objects" => {
-                            current_mode = Mode::Log;
-                        }
-                        Mode::Events if t.name().as_ref() == b"events" => {
-                            current_mode = Mode::Log;
-                        }
-                        Mode::Object if t.name().as_ref() == b"object" => {
-                            if let Some(o) = current_object.take() {
-                                ocel.append_object(
-                                    o.id,
-                                    &o.object_type,
-                                    o.attributes,
-                                    o.relationships,
-                                )
-                                .map_err(Into::into)?;
-                            }
-                            current_mode = Mode::Objects;
-                        }
-                        Mode::Event if t.name().as_ref() == b"event" => {
-                            if let Some(e) = current_event.take() {
-                                ocel.append_event(
-                                    e.id,
-                                    &e.event_type,
-                                    e.time,
-                                    e.attributes,
-                                    e.relationships,
-                                )
-                                .map_err(Into::into)?;
-                            }
-                            current_mode = Mode::Events;
-                        }
-                        _ => {}
-                    },
-                    quick_xml::events::Event::Empty(t) => match current_mode {
-                        Mode::ObjectTypeAttributes if t.name().as_ref() == b"attribute" => {
-                            let name = get_attribute_value(&t, "name")?;
-                            let value_type = get_attribute_value(&t, "type")?;
-                            let ot = current_ob_type.as_mut().unwrap();
-                            object_attribute_types.insert(
-                                (ot.name.clone(), name.clone()),
-                                OCELAttributeType::from_type_str(&value_type),
-                            );
-                            ot.attributes.push(OCELTypeAttribute { name, value_type });
-                        }
-                        Mode::Object => match t.name().as_ref() {
-                            b"relationship" | b"relobj" => {
-                                let object_id = get_attribute_value(&t, "object-id")?;
-                                let qualifier = get_attribute_value(&t, "qualifier")?;
-                                current_object.as_mut().unwrap().relationships.push(
-                                    OCELRelationship {
-                                        object_id,
-                                        qualifier,
-                                    },
-                                );
-                            }
-                            b"attributes" | b"objects" => {}
-                            b"attribute" => {
-                                append_object_attr_decl(&t, &mut current_object, &options)?;
-                            }
-                            _ => {}
-                        },
-                        Mode::Event => match t.name().as_ref() {
-                            b"attributes" | b"objects" => {}
-                            b"relationship" | b"object" | b"relobj" => {
-                                let object_id = get_attribute_value(&t, "object-id")?;
-                                let qualifier = get_attribute_value(&t, "qualifier")?;
-                                current_event.as_mut().unwrap().relationships.push(
-                                    OCELRelationship {
-                                        object_id,
-                                        qualifier,
-                                    },
-                                );
-                            }
-                            b"attribute" => {
-                                append_event_attr_decl(&t, &mut current_event)?;
-                            }
-                            _ => {}
-                        },
-                        Mode::ObjectType | Mode::EventType => {
-                            // Empty <attributes/> tag, no-op
-                        }
-                        Mode::EventTypeAttributes if t.name().as_ref() == b"attribute" => {
-                            let name = get_attribute_value(&t, "name")?;
-                            let value_type = get_attribute_value(&t, "type")?;
-                            let et = current_ev_type.as_mut().unwrap();
-                            event_attribute_types.insert(
-                                (et.name.clone(), name.clone()),
-                                OCELAttributeType::from_type_str(&value_type),
-                            );
-                            et.attributes.push(OCELTypeAttribute { name, value_type });
-                        }
-                        _ => {}
-                    },
-                    quick_xml::events::Event::Text(t) => match current_mode {
-                        Mode::Object => {
-                            let str_val = read_xml_text_unescaped(&mut t.as_ref());
-                            let o = current_object.as_mut().unwrap();
-                            let attr = o.attributes.last_mut().unwrap();
-                            attr.value = parse_attribute_value(
-                                object_attribute_types
-                                    .get(&(o.object_type.clone(), attr.name.clone()))
-                                    .unwrap_or(&OCELAttributeType::String),
-                                str_val,
-                                &options,
-                            );
-                        }
-                        Mode::Event => {
-                            let str_val = read_xml_text_unescaped(&mut t.as_ref());
-                            let e = current_event.as_mut().unwrap();
-                            let attr = e.attributes.last_mut().unwrap();
-                            attr.value = parse_attribute_value(
-                                event_attribute_types
-                                    .get(&(e.event_type.clone(), attr.name.clone()))
-                                    .unwrap_or(&OCELAttributeType::String),
-                                str_val,
-                                &options,
-                            );
-                        }
-                        _ => {}
-                    },
-                    quick_xml::events::Event::Eof => break,
-                    _ => {}
+                    current_event = Some(PartialEvent {
+                        id,
+                        event_type,
+                        time,
+                        attributes: Vec::new(),
+                        relationships: Vec::new(),
+                    });
+                    current_mode = Mode::Event;
                 }
-            }
-            Err(err) => return Err(err.into()),
+                Mode::Event => match t.name().as_ref() {
+                    b"attributes" | b"objects" => {}
+                    b"attribute" => {
+                        append_event_attr_decl(&t, &mut current_event)?;
+                    }
+                    _ => {}
+                },
+                _ => {}
+            },
+            quick_xml::events::Event::End(t) => match current_mode {
+                Mode::ObjectTypeAttributes if t.name().as_ref() == b"attributes" => {
+                    current_mode = Mode::ObjectType;
+                }
+                Mode::ObjectType if t.name().as_ref() == b"object-type" => {
+                    if let Some(ot) = current_ob_type.take() {
+                        ocel.declare_object_type(ot).map_err(Into::into)?;
+                    }
+                    current_mode = Mode::ObjectTypes;
+                }
+                Mode::ObjectTypes if t.name().as_ref() == b"object-types" => {
+                    current_mode = Mode::Log;
+                }
+                Mode::EventTypes if t.name().as_ref() == b"event-types" => {
+                    current_mode = Mode::Log;
+                }
+                Mode::EventType if t.name().as_ref() == b"event-type" => {
+                    if let Some(et) = current_ev_type.take() {
+                        ocel.declare_event_type(et).map_err(Into::into)?;
+                    }
+                    current_mode = Mode::EventTypes;
+                }
+                Mode::EventTypeAttributes if t.name().as_ref() == b"attributes" => {
+                    current_mode = Mode::EventType;
+                }
+                Mode::Log if t.name().as_ref() == b"log" => {
+                    current_mode = Mode::None;
+                }
+                Mode::Objects if t.name().as_ref() == b"objects" => {
+                    current_mode = Mode::Log;
+                }
+                Mode::Events if t.name().as_ref() == b"events" => {
+                    current_mode = Mode::Log;
+                }
+                Mode::Object if t.name().as_ref() == b"object" => {
+                    if let Some(o) = current_object.take() {
+                        ocel.append_object(o.id, &o.object_type, o.attributes, o.relationships)
+                            .map_err(Into::into)?;
+                    }
+                    current_mode = Mode::Objects;
+                }
+                Mode::Event if t.name().as_ref() == b"event" => {
+                    if let Some(e) = current_event.take() {
+                        ocel.append_event(
+                            e.id,
+                            &e.event_type,
+                            e.time,
+                            e.attributes,
+                            e.relationships,
+                        )
+                        .map_err(Into::into)?;
+                    }
+                    current_mode = Mode::Events;
+                }
+                _ => {}
+            },
+            quick_xml::events::Event::Empty(t) => match current_mode {
+                Mode::ObjectTypeAttributes if t.name().as_ref() == b"attribute" => {
+                    let name = get_attribute_value(&t, "name")?;
+                    let value_type = get_attribute_value(&t, "type")?;
+                    let ot = current_ob_type.as_mut().unwrap();
+                    object_attribute_types.insert(
+                        (ot.name.clone(), name.clone()),
+                        OCELAttributeType::from_type_str(&value_type),
+                    );
+                    ot.attributes.push(OCELTypeAttribute { name, value_type });
+                }
+                Mode::Object => match t.name().as_ref() {
+                    b"relationship" | b"relobj" => {
+                        let object_id = get_attribute_value(&t, "object-id")?;
+                        let qualifier = get_attribute_value(&t, "qualifier")?;
+                        current_object
+                            .as_mut()
+                            .unwrap()
+                            .relationships
+                            .push(OCELRelationship {
+                                object_id,
+                                qualifier,
+                            });
+                    }
+                    b"attributes" | b"objects" => {}
+                    b"attribute" => {
+                        append_object_attr_decl(&t, &mut current_object, &options)?;
+                    }
+                    _ => {}
+                },
+                Mode::Event => match t.name().as_ref() {
+                    b"attributes" | b"objects" => {}
+                    b"relationship" | b"object" | b"relobj" => {
+                        let object_id = get_attribute_value(&t, "object-id")?;
+                        let qualifier = get_attribute_value(&t, "qualifier")?;
+                        current_event
+                            .as_mut()
+                            .unwrap()
+                            .relationships
+                            .push(OCELRelationship {
+                                object_id,
+                                qualifier,
+                            });
+                    }
+                    b"attribute" => {
+                        append_event_attr_decl(&t, &mut current_event)?;
+                    }
+                    _ => {}
+                },
+                Mode::ObjectType | Mode::EventType => {
+                    // Empty <attributes/> tag, no-op
+                }
+                Mode::EventTypeAttributes if t.name().as_ref() == b"attribute" => {
+                    let name = get_attribute_value(&t, "name")?;
+                    let value_type = get_attribute_value(&t, "type")?;
+                    let et = current_ev_type.as_mut().unwrap();
+                    event_attribute_types.insert(
+                        (et.name.clone(), name.clone()),
+                        OCELAttributeType::from_type_str(&value_type),
+                    );
+                    et.attributes.push(OCELTypeAttribute { name, value_type });
+                }
+                _ => {}
+            },
+            quick_xml::events::Event::Text(t) => match current_mode {
+                Mode::Object => {
+                    let str_val = read_xml_text_unescaped(&mut t.as_ref());
+                    let o = current_object.as_mut().unwrap();
+                    let attr = o.attributes.last_mut().unwrap();
+                    attr.value = parse_attribute_value(
+                        object_attribute_types
+                            .get(&(o.object_type.clone(), attr.name.clone()))
+                            .unwrap_or(&OCELAttributeType::String),
+                        str_val,
+                        &options,
+                    );
+                }
+                Mode::Event => {
+                    let str_val = read_xml_text_unescaped(&mut t.as_ref());
+                    let e = current_event.as_mut().unwrap();
+                    let attr = e.attributes.last_mut().unwrap();
+                    attr.value = parse_attribute_value(
+                        event_attribute_types
+                            .get(&(e.event_type.clone(), attr.name.clone()))
+                            .unwrap_or(&OCELAttributeType::String),
+                        str_val,
+                        &options,
+                    );
+                }
+                _ => {}
+            },
+            quick_xml::events::Event::Eof => break,
+            _ => {}
         }
+
         buf.clear();
     }
     if !has_object_or_event_types_decl {
