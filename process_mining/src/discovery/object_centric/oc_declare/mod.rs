@@ -1,6 +1,8 @@
 //! Discovering OC-DECLARE Models from Object-Centric Event Data
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use rustc_hash::FxHashSet;
+
 use itertools::Itertools;
 use macros_process_mining::register_binding;
 use rayon::prelude::*;
@@ -8,9 +10,11 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    conformance::oc_declare::get_for_all_evs_perf_thresh,
+    conformance::oc_declare::satisfies_threshold,
     core::{
-        event_data::object_centric::linked_ocel::{LinkedOCELAccess, SlimLinkedOCEL},
+        event_data::object_centric::linked_ocel::{
+            e2o_rev_type_index::E2ORevByTypeIndex, LinkedOCELAccess, SlimLinkedOCEL,
+        },
         process_models::oc_declare::{
             get_activity_object_involvements, get_object_to_object_involvements,
             get_rev_object_to_object_involvements, OCDeclareArc, OCDeclareArcLabel,
@@ -99,6 +103,8 @@ pub fn discover_behavior_constraints(
     let ob_ob_inv: HashMap<String, HashMap<String, ObjectInvolvementCounts>> =
         get_object_to_object_involvements(locel);
     let ob_ob_rev_inv = get_rev_object_to_object_involvements(locel);
+    // Built once, shared by every check below
+    let index = E2ORevByTypeIndex::build(locel);
     let direction = OCDeclareArcType::AS;
     let acts_to_use = options
         .acts_to_use
@@ -125,8 +131,11 @@ pub fn discover_behavior_constraints(
                 &options.counts_for_generation,
                 options.noise_threshold,
                 locel,
+                &index,
             );
-            let old = combine_constraints(act_arcs, act1, act2, direction, &options, locel, true);
+            let old = combine_constraints(
+                act_arcs, act1, act2, direction, &options, locel, true, &index,
+            );
             let v = old
                 .clone()
                 // .into_iter()
@@ -143,9 +152,10 @@ pub fn discover_behavior_constraints(
                         label,
                         counts: options.counts_for_filter,
                     };
-                    if arc.get_for_all_evs_perf_thresh(locel, options.noise_threshold) {
+                    if arc.satisfies_threshold_indexed(locel, options.noise_threshold, Some(&index))
+                    {
                         arc.counts.1 = None;
-                        get_stricter_arrows_for_as(arc, &options, locel)
+                        get_stricter_arrows_for_as(arc, &options, locel, &index)
                     } else {
                         vec![]
                     }
@@ -160,13 +170,14 @@ pub fn discover_behavior_constraints(
         OCDeclareReductionMode::Lossy => reduce_oc_arcs(ret, false),
     };
     if options.refinement {
-        refine_oc_arcs(
+        refine_oc_arcs_indexed(
             &reduced_ret,
             &act_ob_inv,
             &ob_ob_inv,
             &ob_ob_rev_inv,
             &options,
             locel,
+            &index,
         )
     } else {
         reduced_ret
@@ -176,7 +187,8 @@ pub fn discover_behavior_constraints(
 /// Get possible object involvement labels for given activity pair and object involvements
 ///
 /// Returns the set of viable labels
-pub fn get_oi_labels<'a>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn get_oi_labels<'a>(
     act1: &'a str,
     act2: &'a str,
     obj_invs: Vec<(ObjectTypeAssociation, bool)>,
@@ -184,6 +196,7 @@ pub fn get_oi_labels<'a>(
     counts_for_generation: &(Option<usize>, Option<usize>),
     noise_threshold: f64,
     locel: &SlimLinkedOCEL,
+    index: &E2ORevByTypeIndex,
 ) -> Vec<OCDeclareArcLabel> {
     let mut ret = Vec::new();
     for (ot, is_multiple) in obj_invs {
@@ -193,7 +206,7 @@ pub fn get_oi_labels<'a>(
             any: vec![ot],
             all: vec![],
         };
-        let sat = get_for_all_evs_perf_thresh(
+        let sat = satisfies_threshold(
             act1,
             act2,
             &any_label,
@@ -201,6 +214,7 @@ pub fn get_oi_labels<'a>(
             counts_for_generation,
             locel,
             noise_threshold,
+            Some(index),
         );
         if sat {
             // It IS a viable candidate!
@@ -214,7 +228,7 @@ pub fn get_oi_labels<'a>(
                     any: vec![],
                     each: any_label.any.clone(),
                 };
-                let each_sat = get_for_all_evs_perf_thresh(
+                let each_sat = satisfies_threshold(
                     act1,
                     act2,
                     &each_label,
@@ -222,6 +236,7 @@ pub fn get_oi_labels<'a>(
                     counts_for_generation,
                     locel,
                     noise_threshold,
+                    Some(index),
                 );
                 if each_sat {
                     // Each is also valid!
@@ -231,7 +246,7 @@ pub fn get_oi_labels<'a>(
                         any: vec![],
                         each: vec![],
                     };
-                    let all_sat = get_for_all_evs_perf_thresh(
+                    let all_sat = satisfies_threshold(
                         act1,
                         act2,
                         &all_label,
@@ -239,6 +254,7 @@ pub fn get_oi_labels<'a>(
                         counts_for_generation,
                         locel,
                         noise_threshold,
+                        Some(index),
                     );
                     if all_sat {
                         ret.push(all_label);
@@ -262,7 +278,8 @@ pub fn get_oi_labels<'a>(
 ///
 /// Returns the set of combined constraints
 ///
-pub fn combine_constraints<'a>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn combine_constraints<'a>(
     mut act_arcs: Vec<OCDeclareArcLabel>,
     act1: &'a str,
     act2: &'a str,
@@ -270,13 +287,14 @@ pub fn combine_constraints<'a>(
     options: &OCDeclareDiscoveryOptions,
     locel: &SlimLinkedOCEL,
     iteration_check: bool,
-) -> HashSet<OCDeclareArcLabel> {
+    index: &E2ORevByTypeIndex,
+) -> FxHashSet<OCDeclareArcLabel> {
     let mut changed = true;
-    let mut old: HashSet<_> = act_arcs.iter().cloned().collect();
+    let mut old: FxHashSet<_> = act_arcs.iter().cloned().collect();
     let mut iteration = 1;
     while changed {
         let x = 0..act_arcs.len();
-        let new_res: HashSet<_> = x
+        let new_res: FxHashSet<_> = x
             .flat_map(|arc1_i| ((arc1_i + 1)..act_arcs.len()).map(move |arc2_i| (arc1_i, arc2_i)))
             // .par_bridge()
             .filter_map(|(arc1_i, arc2_i)| {
@@ -291,7 +309,7 @@ pub fn combine_constraints<'a>(
                 if iteration_check && new_n != iteration + 1 {
                     return None;
                 }
-                let sat = get_for_all_evs_perf_thresh(
+                let sat = satisfies_threshold(
                     act1,
                     act2,
                     &new_arc_label,
@@ -299,6 +317,7 @@ pub fn combine_constraints<'a>(
                     &options.counts_for_generation,
                     locel,
                     options.noise_threshold,
+                    Some(index),
                 );
                 if sat {
                     Some(new_arc_label)
@@ -331,6 +350,7 @@ fn get_stricter_arrows_for_as(
     mut a: OCDeclareArc,
     options: &OCDeclareDiscoveryOptions,
     locel: &SlimLinkedOCEL,
+    index: &E2ORevByTypeIndex,
 ) -> Vec<OCDeclareArc> {
     let mut ret: Vec<OCDeclareArc> = Vec::new();
     if options
@@ -339,13 +359,13 @@ fn get_stricter_arrows_for_as(
     {
         // Test EF
         a.arc_type = OCDeclareArcType::EF;
-        if a.get_for_all_evs_perf_thresh(locel, options.noise_threshold) {
+        if a.satisfies_threshold_indexed(locel, options.noise_threshold, Some(index)) {
             // Test DF
             a.arc_type = OCDeclareArcType::DF;
             if options
                 .considered_arrow_types
                 .contains(&OCDeclareArcType::DF)
-                && a.get_for_all_evs_perf_thresh(locel, options.noise_threshold)
+                && a.satisfies_threshold_indexed(locel, options.noise_threshold, Some(index))
             {
                 ret.push(a.clone());
             } else {
@@ -359,7 +379,7 @@ fn get_stricter_arrows_for_as(
     {
         a.arc_type = OCDeclareArcType::DF;
 
-        if a.get_for_all_evs_perf_thresh(locel, options.noise_threshold) {
+        if a.satisfies_threshold_indexed(locel, options.noise_threshold, Some(index)) {
             ret.push(a.clone());
         }
     }
@@ -370,13 +390,13 @@ fn get_stricter_arrows_for_as(
     {
         // Test EP
         a.arc_type = OCDeclareArcType::EP;
-        if a.get_for_all_evs_perf_thresh(locel, options.noise_threshold) {
+        if a.satisfies_threshold_indexed(locel, options.noise_threshold, Some(index)) {
             // Test DP
             a.arc_type = OCDeclareArcType::DP;
             if options
                 .considered_arrow_types
                 .contains(&OCDeclareArcType::DP)
-                && a.get_for_all_evs_perf_thresh(locel, options.noise_threshold)
+                && a.satisfies_threshold_indexed(locel, options.noise_threshold, Some(index))
             {
                 ret.push(a.clone());
             } else {
@@ -390,7 +410,7 @@ fn get_stricter_arrows_for_as(
     {
         a.arc_type = OCDeclareArcType::DP;
 
-        if a.get_for_all_evs_perf_thresh(locel, options.noise_threshold) {
+        if a.satisfies_threshold_indexed(locel, options.noise_threshold, Some(index)) {
             ret.push(a.clone());
         }
     }
@@ -402,7 +422,7 @@ fn get_stricter_arrows_for_as(
         && a.from != a.to
     {
         a.arc_type = OCDeclareArcType::AS;
-        if a.get_for_all_evs_perf_thresh(locel, options.noise_threshold) {
+        if a.satisfies_threshold_indexed(locel, options.noise_threshold, Some(index)) {
             ret.push(a);
         }
     }
@@ -419,6 +439,28 @@ pub fn refine_oc_arcs(
     ob_ob_rev_inv: &HashMap<String, HashMap<String, ObjectInvolvementCounts>>,
     options: &OCDeclareDiscoveryOptions,
     locel: &SlimLinkedOCEL,
+) -> Vec<OCDeclareArc> {
+    refine_oc_arcs_indexed(
+        all_arcs,
+        act_ob_inv,
+        ob_ob_inv,
+        ob_ob_rev_inv,
+        options,
+        locel,
+        &E2ORevByTypeIndex::build(locel),
+    )
+}
+
+/// As [`refine_oc_arcs`], but reusing an existing index
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refine_oc_arcs_indexed(
+    all_arcs: &[OCDeclareArc],
+    act_ob_inv: &HashMap<String, HashMap<String, ObjectInvolvementCounts>>,
+    ob_ob_inv: &HashMap<String, HashMap<String, ObjectInvolvementCounts>>,
+    ob_ob_rev_inv: &HashMap<String, HashMap<String, ObjectInvolvementCounts>>,
+    options: &OCDeclareDiscoveryOptions,
+    locel: &SlimLinkedOCEL,
+    index: &E2ORevByTypeIndex,
 ) -> Vec<OCDeclareArc> {
     let act_pairs: HashSet<(_, _)> = all_arcs
         .iter()
@@ -449,6 +491,7 @@ pub fn refine_oc_arcs(
                 &(Some(1), None),
                 options.noise_threshold,
                 locel,
+                index,
             );
 
             // Try to combine with previous labels
@@ -461,7 +504,7 @@ pub fn refine_oc_arcs(
                             None
                         } else {
                             let combined = l.combine(&arc.label);
-                            let sat = get_for_all_evs_perf_thresh(
+                            let sat = satisfies_threshold(
                                 act1,
                                 act2,
                                 &combined,
@@ -469,6 +512,7 @@ pub fn refine_oc_arcs(
                                 &options.counts_for_filter,
                                 locel,
                                 options.noise_threshold,
+                                Some(index),
                             );
                             if sat {
                                 Some(combined)
@@ -479,8 +523,16 @@ pub fn refine_oc_arcs(
                     })
                     .collect();
                 labels.push(arc.label);
-                let combined =
-                    combine_constraints(labels, act1, act2, arc.arc_type, options, locel, false);
+                let combined = combine_constraints(
+                    labels,
+                    act1,
+                    act2,
+                    arc.arc_type,
+                    options,
+                    locel,
+                    false,
+                    index,
+                );
                 new_arcs.extend(combined.into_iter().map(|a| OCDeclareArc {
                     from: OCDeclareNode::new(act1),
                     to: OCDeclareNode::new(act2),
