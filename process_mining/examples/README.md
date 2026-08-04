@@ -19,6 +19,13 @@ This folder contains example usages of the `process_mining` crate.
   cargo run --example petri_net_import_export -- <input_model.pnml> <output_model.pnml>
   ```
 
+## Conformance Checking
+
+- **`calculate_alignments.rs`**: Imports an XES event log and a Petri net, computes optimal alignments for every trace variant, and prints the resulting fitness.
+  ```bash
+  cargo run --release --example calculate_alignments -- <path_to_log.xes> <path_to_model.pnml>
+  ```
+
 ## Object-Centric Process Mining
 
 - **`ocel_stats.rs`**: Imports an OCEL and prints basic statistics.

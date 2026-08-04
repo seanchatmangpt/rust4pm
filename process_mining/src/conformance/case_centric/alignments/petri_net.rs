@@ -12,7 +12,10 @@ use crate::{
         sync_prod_net::{SyncProdNetConstructionError, SyncProdNetTransition, SyncProductNet},
         AlignmentMove, AlignmentResult,
     },
-    utils::dijkstra_search::{search, NodeID, SearchError, SearchProblem, SearchState},
+    utils::dijkstra_search::{
+        search_bidirectional, NodeID, ReversibleSearchProblem, SearchError, SearchLimits,
+        SearchProblem, SearchResult, SearchState,
+    },
 };
 
 /// Alignment Error
@@ -80,26 +83,28 @@ pub(crate) struct PetriNetAlignmentSpace {
 }
 
 impl PetriNetAlignmentSpace {
-    fn reset(&mut self, net: &SyncProductNet) {
-        self.num_places = net.num_model_places;
+    fn reset(&mut self, net: &SyncProductNet<'_>, reverse: bool) {
+        self.num_places = net.model.num_places;
         self.markings.clear();
         self.trace_pos.clear();
         self.seen.clear();
-        self.current.resize(net.num_model_places, 0);
-        self.next.resize(net.num_model_places, 0);
+        self.current.resize(net.model.num_places, 0);
+        self.next.resize(net.model.num_places, 0);
+        // A backward search starts where a forward one ends
+        let (marking, trace_pos) = if reverse {
+            (&net.model.final_marking, net.trace_length)
+        } else {
+            (&net.model.initial_marking, 0)
+        };
         self.markings
-            .extend_from_slice(&net.initial_marking[..net.num_model_places]);
-        self.trace_pos.push(0);
-        self.add_seen(0);
+            .extend_from_slice(&marking[..net.model.num_places]);
+        self.trace_pos.push(trace_pos);
+        self.add_seen(0, hash_state(marking, trace_pos));
     }
 
+    /// Record a node under the given hash of its state
     #[inline]
-    fn add_seen(&mut self, node: NodeID) {
-        let off = node as usize * self.num_places;
-        let hash = hash_state(
-            &self.markings[off..off + self.num_places],
-            self.trace_pos[node as usize],
-        );
+    fn add_seen(&mut self, node: NodeID, hash: u64) {
         let markings = &self.markings;
         let trace_pos = &self.trace_pos;
         let num_places = self.num_places;
@@ -111,7 +116,16 @@ impl PetriNetAlignmentSpace {
 
     #[inline]
     fn find_seen(&self, marking: &[TokenCount], trace_position: TracePos) -> Option<NodeID> {
-        let hash = hash_state(marking, trace_position);
+        self.find_seen_hashed(hash_state(marking, trace_position), marking, trace_position)
+    }
+
+    #[inline]
+    fn find_seen_hashed(
+        &self,
+        hash: u64,
+        marking: &[TokenCount],
+        trace_position: TracePos,
+    ) -> Option<NodeID> {
         let num_places = self.num_places;
         self.seen
             .find(hash, |node| {
@@ -123,48 +137,53 @@ impl PetriNetAlignmentSpace {
     }
 }
 
+/// Bytes one queued state costs: its search node, its `(marking, trace position)`, and its slot
+/// in the `seen` index. Both directions store the same per state.
+pub(crate) const fn bytes_per_state(num_places: usize) -> usize {
+    SearchState::<PetriNetStep>::bytes_per_node()
+        + size_of::<TracePos>()
+        // A `seen` slot is a NodeID, plus hashbrown's control byte and spare capacity
+        + 2 * size_of::<NodeID>()
+        + num_places
+}
+
 /// Alignment as a [`SearchProblem`]: a state is a `(model marking, trace position)`, an edge fires
 /// a sync. prod. net transition
 #[derive(Debug)]
 struct PetriNetAlignment<'a> {
-    net: &'a SyncProductNet,
+    net: &'a SyncProductNet<'a>,
     space: &'a mut PetriNetAlignmentSpace,
+    /// Search backwards, from the final marking, firing every transition in reverse
+    reverse: bool,
 }
 
-impl<'a> PetriNetAlignment<'a> {
-    /// Build the alignment problem over `net`, storing search state in `space`
-    fn new(net: &'a SyncProductNet, space: &'a mut PetriNetAlignmentSpace) -> Self {
-        Self { net, space }
-    }
-}
-
-/// Instantiate the search problem ([`SearchProblem`]) for the Petri net alignment
 impl SearchProblem for PetriNetAlignment<'_> {
-    /// A single step in the search corresponds to firing a sync net transition, represented by [`PetriNetStep`].
     type Step = PetriNetStep;
-    /// Costs are represented as `u32`, also see [`super::cost::CostFunction`]
     type Cost = u32;
 
-    /// Reset the search space and return the initial node ID (0)
     fn initial(&mut self) -> NodeID {
-        self.space.reset(self.net);
+        self.space.reset(self.net, self.reverse);
         0
     }
-    /// Get maximal edge cost in the synchronous product net (needed for bucket setup)
+
     fn max_edge_cost(&self) -> u32 {
         self.net.max_edge_cost
     }
 
-    /// Check whether the given node is a goal state (final marking and trace position at the end of the trace)
+    /// Whether the whole trace is consumed and the target marking reached
     #[inline]
     fn is_goal(&self, node: NodeID) -> bool {
-        let np = self.net.num_model_places;
+        let np = self.net.model.num_places;
         let off = node as usize * np;
-        self.space.trace_pos[node as usize] == self.net.trace_length
-            && self.space.markings[off..off + np] == self.net.final_marking[..np]
+        let (marking, trace_pos) = if self.reverse {
+            (&self.net.model.initial_marking, 0)
+        } else {
+            (&self.net.model.final_marking, self.net.trace_length)
+        };
+        self.space.trace_pos[node as usize] == trace_pos
+            && self.space.markings[off..off + np] == marking[..np]
     }
 
-    /// Expand the given node, emitting all reachable nodes and their costs via the `emit` callback
     #[inline]
     fn expand<F: FnMut(NodeID, bool, u32, PetriNetStep)>(
         &mut self,
@@ -172,6 +191,7 @@ impl SearchProblem for PetriNetAlignment<'_> {
         via: Option<PetriNetStep>,
         mut emit: F,
     ) {
+        let reverse = self.reverse;
         let net = self.net;
         let space = &mut *self.space;
         let np = space.num_places;
@@ -183,29 +203,37 @@ impl SearchProblem for PetriNetAlignment<'_> {
             .copy_from_slice(&space.markings[off..off + np]);
 
         // Log/sync moves for the current event, then model moves (fixed ordering prunes states).
-        let log_or_sync = net
-            .transitions_by_trace_pos
-            .get(trace_pos as usize)
+        // The two commute at equal cost, so keeping one order per pair loses no shortest path.
+        // Going backwards, the event to consume is the one before the current position.
+        let event = if reverse {
+            trace_pos.checked_sub(1)
+        } else {
+            Some(trace_pos)
+        };
+        let log_or_sync = event
+            .and_then(|event| net.transitions_by_trace_pos.get(event as usize))
             .map(|v| v.as_slice())
             .unwrap_or_default();
         // After a log move, model moves are pruned, so the range collapses to empty.
         let model_end = if last_move_was_log {
             0
         } else {
-            net.num_model_trans
+            net.num_model_trans()
         };
 
         for trans_idx in log_or_sync.iter().copied().chain(0..model_end) {
-            let trans = &net.transitions[trans_idx];
-            if !is_enabled(&space.current, trans) {
+            let trans = net.transition(trans_idx);
+            if !is_enabled(&space.current, trans, reverse) {
                 continue;
             }
-            if fire_transition(&space.current, &mut space.next, trans).is_none() {
+            if fire_transition(&space.current, &mut space.next, trans, reverse).is_none() {
                 continue;
             }
             let is_model_move = matches!(trans.move_type, AlignmentMove::ModelMove { .. });
             let new_trace_pos = if is_model_move {
                 trace_pos
+            } else if reverse {
+                trace_pos - 1
             } else {
                 trace_pos + 1
             };
@@ -213,15 +241,16 @@ impl SearchProblem for PetriNetAlignment<'_> {
                 transition: trans_idx as u32,
                 log_move: matches!(trans.move_type, AlignmentMove::LogMove { .. }),
             };
-
             let cost = trans.cost;
-            match space.find_seen(&space.next, new_trace_pos) {
+            // One hash for both the lookup and a possible insert
+            let hash = hash_state(&space.next, new_trace_pos);
+            match space.find_seen_hashed(hash, &space.next, new_trace_pos) {
                 Some(existing) => emit(existing, false, cost, step),
                 None => {
                     let new_id = space.trace_pos.len() as NodeID;
                     space.markings.extend_from_slice(&space.next);
                     space.trace_pos.push(new_trace_pos);
-                    space.add_seen(new_id);
+                    space.add_seen(new_id, hash);
                     emit(new_id, true, cost, step);
                 }
             }
@@ -229,59 +258,106 @@ impl SearchProblem for PetriNetAlignment<'_> {
     }
 }
 
-/// Compute an optimal alignment using [`search`]
+impl ReversibleSearchProblem for PetriNetAlignment<'_> {
+    #[inline]
+    fn find_in(&self, node: NodeID, other: &Self) -> Option<NodeID> {
+        let np = self.net.model.num_places;
+        let off = node as usize * np;
+        other.space.find_seen(
+            &self.space.markings[off..off + np],
+            self.space.trace_pos[node as usize],
+        )
+    }
+}
+
+/// Search spaces reused across traces, one per search direction
+#[derive(Debug, Default)]
+pub(crate) struct AlignmentContext {
+    forward: (PetriNetAlignmentSpace, SearchState<PetriNetStep>),
+    backward: (PetriNetAlignmentSpace, SearchState<PetriNetStep>),
+}
+
+/// Compute an optimal alignment, searching from the initial and the final marking at once
 pub(crate) fn align(
-    net: &SyncProductNet,
-    space: &mut PetriNetAlignmentSpace,
-    state: &mut SearchState<PetriNetStep>,
-    max_states: Option<usize>,
+    net: &SyncProductNet<'_>,
+    ctx: &mut AlignmentContext,
+    limits: SearchLimits,
 ) -> Result<AlignmentResult, AlignmentError> {
-    let mut problem = PetriNetAlignment::new(net, space);
-    let res = search(&mut problem, state, max_states)?;
-    Ok(AlignmentResult {
+    let mut forward = PetriNetAlignment {
+        net,
+        space: &mut ctx.forward.0,
+        reverse: false,
+    };
+    let mut backward = PetriNetAlignment {
+        net,
+        space: &mut ctx.backward.0,
+        reverse: true,
+    };
+    let res = search_bidirectional(
+        &mut forward,
+        &mut backward,
+        &mut ctx.forward.1,
+        &mut ctx.backward.1,
+        limits,
+    )?;
+    Ok(result_from(net, res))
+}
+
+fn result_from(net: &SyncProductNet<'_>, res: SearchResult<PetriNetStep>) -> AlignmentResult {
+    AlignmentResult {
         moves: res
             .path
             .iter()
-            .map(|s| net.transitions[s.transition as usize].move_type.clone())
+            .map(|s| net.transition(s.transition as usize).move_type.clone())
             .collect(),
         cost: res.cost,
         states_visited: res.states_visited,
-    })
+    }
 }
 
-#[inline]
 /// Tests whether the given transition is enabled in the given marking
-fn is_enabled(marking: &[TokenCount], trans: &SyncProdNetTransition) -> bool {
-    trans
-        .inputs
+#[inline]
+fn is_enabled(marking: &[TokenCount], trans: &SyncProdNetTransition, reverse: bool) -> bool {
+    let consumed = if reverse {
+        &trans.outputs
+    } else {
+        &trans.inputs
+    };
+    consumed
         .iter()
         .all(|(place, weight)| &marking[*place] >= weight)
 }
 
-#[inline]
-#[must_use]
 /// Fire the given transition, transforming the current marking into the `reached` marking.
+/// When `reverse`, inputs and outputs swap roles.
 ///
 /// Returns `None` if the reached marking would exceed `TokenCount::MAX` tokens.
 /// In this case, the reached marking is considered out-of-bounds and should be pruned.
+#[inline]
+#[must_use]
 fn fire_transition(
     current: &[TokenCount],
     reached: &mut [TokenCount],
     trans: &SyncProdNetTransition,
+    reverse: bool,
 ) -> Option<()> {
+    let (consumed, produced) = if reverse {
+        (&trans.outputs, &trans.inputs)
+    } else {
+        (&trans.inputs, &trans.outputs)
+    };
     reached.copy_from_slice(current);
-    for (place, weight) in &trans.inputs {
+    for (place, weight) in consumed {
         reached[*place] -= weight;
     }
-    for (place, weight) in &trans.outputs {
-        // Handle overflow to prevent arriving at incorrect markings
+    for (place, weight) in produced {
         reached[*place] = reached[*place].checked_add(*weight)?;
     }
     Some(())
 }
 
-#[inline]
 /// Hash a given state (combination of marking and trace position)
+#[inline]
 fn hash_state(marking: &[TokenCount], trace_pos: TracePos) -> u64 {
     let mut h = FxHasher::default();
     h.write(marking);
