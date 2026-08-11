@@ -93,6 +93,9 @@ pub struct AlignmentOptions {
 /// How many alignment states fit in `bytes`, for a net with `num_places` places.
 ///
 /// Traces are aligned in parallel, so divide a whole-machine budget by the thread count first.
+///
+/// Pessimistic: it assumes every place is marked at once, while real markings mark a small
+/// fraction of them, so treat the result as a floor rather than a prediction.
 pub const fn states_in_memory(bytes: usize, num_places: usize) -> usize {
     bytes / petri_net::bytes_per_state(num_places)
 }
@@ -479,6 +482,57 @@ mod test {
         assert_eq!(
             res,
             Err(AlignmentError::SearchError(SearchError::Unreachable))
+        );
+    }
+
+    /// A transition consuming a place past the 64th is not covered by the place word, so it must
+    /// still be checked against the marking rather than taken as enabled.
+    ///
+    /// Place indices come from a `HashMap`, so which place lands past the word varies per run;
+    /// repeating makes it near-certain that at least one attempt puts it there.
+    #[test]
+    fn place_past_the_mask_word_still_blocks() {
+        for _ in 0..20 {
+            let mut net = PetriNet::new();
+            let places: Vec<_> = (0..200).map(|_| net.add_place(None)).collect();
+            // "a" carries the token from start to end
+            let a = net.add_transition(Some("a".to_string()), None);
+            net.add_arc(ArcType::PlaceTransition(places[0].0, a.0), None);
+            net.add_arc(ArcType::TransitionPlace(a.0, places[1].0), None);
+            // "b" needs a token in a place nothing ever marks, so it can never fire
+            let b = net.add_transition(Some("b".to_string()), None);
+            net.add_arc(ArcType::PlaceTransition(places[2].0, b.0), None);
+            net.add_arc(ArcType::TransitionPlace(b.0, places[1].0), None);
+            net.initial_marking = Some([(places[0], 1)].into_iter().collect());
+            net.final_markings = Some(vec![[(places[1], 1)].into_iter().collect()]);
+
+            let options = AlignmentOptions::default();
+            assert_eq!(align_trace(&net, &["a"], &options).unwrap().cost, 0);
+            assert_eq!(
+                align_trace(&net, &["b"], &options).unwrap().cost,
+                2,
+                "\"b\" cannot fire, so only a log move plus a model move aligns"
+            );
+        }
+    }
+
+    /// A zero-weight arc moves no token, so it must neither block its transition nor fire
+    #[test]
+    fn zero_weight_arcs_are_ignored() {
+        let mut net = PetriNet::new();
+        let places: Vec<_> = (0..3).map(|_| net.add_place(None)).collect();
+        let a = net.add_transition(Some("a".to_string()), None);
+        net.add_arc(ArcType::PlaceTransition(places[0].0, a.0), None);
+        // Takes nothing from a place that never holds a token, so it must not stop "a" firing
+        net.add_arc(ArcType::PlaceTransition(places[2].0, a.0), Some(0));
+        net.add_arc(ArcType::TransitionPlace(a.0, places[1].0), None);
+        net.initial_marking = Some([(places[0], 1)].into_iter().collect());
+        net.final_markings = Some(vec![[(places[1], 1)].into_iter().collect()]);
+        assert_eq!(
+            align_trace(&net, &["a"], &AlignmentOptions::default())
+                .unwrap()
+                .cost,
+            0
         );
     }
 
