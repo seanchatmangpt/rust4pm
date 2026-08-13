@@ -18,6 +18,8 @@ use crate::{
     },
 };
 
+pub(crate) mod all_optimal;
+
 /// Alignment Error
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub enum AlignmentError {

@@ -25,6 +25,8 @@ pub mod petri_net;
 pub(crate) mod reachability;
 pub mod sync_prod_net;
 
+pub use petri_net::all_optimal::{align_trace_all_optimal, AllOptimalAlignments, OptimalAlignments};
+
 /// A single alignment step
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum AlignmentMove {
