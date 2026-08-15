@@ -11,7 +11,8 @@ use std::hash::Hash;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 
-use crate::conformance::oc_declare::{get_for_all_evs_perf, get_for_all_evs_perf_thresh};
+use crate::conformance::oc_declare::{satisfies_threshold, violation_fraction};
+use crate::core::event_data::object_centric::linked_ocel::e2o_rev_type_index::E2ORevByTypeIndex;
 use crate::core::event_data::object_centric::linked_ocel::slim_linked_ocel::{
     EventIndex, ObjectIndex,
 };
@@ -85,26 +86,33 @@ impl OCDeclareArc {
     /// Get fraction of source events violating this constraint arc
     ///
     /// Returns a value from 0 (all source events satisfy this constraint) to 1 (all source events violate this constraint)
-    pub fn get_for_all_evs_perf(&self, linked_ocel: &SlimLinkedOCEL) -> f64 {
-        get_for_all_evs_perf(
+    pub fn violation_fraction(&self, linked_ocel: &SlimLinkedOCEL) -> f64 {
+        violation_fraction(
             self.from.as_str(),
             self.to.as_str(),
             &self.label,
             &self.arc_type,
             &self.counts,
             linked_ocel,
+            None,
         )
     }
 
     /// Checks whether the number of events violating this constraint arc is below (<=) the given noise threshold
     ///
     /// Returns false, if the fraction of events violating the constraint is above the noise threshold.
-    pub fn get_for_all_evs_perf_thresh(
+    pub fn satisfies_threshold(&self, linked_ocel: &SlimLinkedOCEL, noise_thresh: f64) -> bool {
+        self.satisfies_threshold_indexed(linked_ocel, noise_thresh, None)
+    }
+
+    /// As [`OCDeclareArc::satisfies_threshold`], but reusing an existing index
+    pub(crate) fn satisfies_threshold_indexed(
         &self,
         linked_ocel: &SlimLinkedOCEL,
         noise_thresh: f64,
+        index: Option<&E2ORevByTypeIndex>,
     ) -> bool {
-        get_for_all_evs_perf_thresh(
+        satisfies_threshold(
             self.from.as_str(),
             self.to.as_str(),
             &self.label,
@@ -112,6 +120,7 @@ impl OCDeclareArc {
             &self.counts,
             linked_ocel,
             noise_thresh,
+            index,
         )
     }
 }
@@ -652,11 +661,11 @@ impl EventOrSynthetic {
                 if matches!(self, EventOrSynthetic::Init(_)) {
                     evs.min_by_key(|ev| locel.get_ev_time(*ev))
                         .copied()
-                        .unwrap_or(0_usize.into())
+                        .unwrap_or(0_u32.into())
                 } else {
                     evs.max_by_key(|ev| locel.get_ev_time(*ev))
                         .copied()
-                        .unwrap_or(0_usize.into())
+                        .unwrap_or(0_u32.into())
                 }
             }
         }
