@@ -68,7 +68,7 @@ impl Node {
             Node::Leaf(_) => true,
         }
     }
-  
+
     ///
     /// Calls either [`Operator::add_to_petri_net`] or [`Leaf::add_to_petri_net`] depending on the
     /// [`Node`] type.
@@ -133,11 +133,15 @@ impl Node {
                 // meaningful as a direct child. Remove duplicates introduced
                 // when EmptyTraces fallthrough shells are folded upward.
                 if op.operator_type == OperatorType::ExclusiveChoice {
-                    let tau = Node::Leaf(Leaf { activity_label: LeafLabel::Tau });
+                    let tau = Node::Leaf(Leaf {
+                        activity_label: LeafLabel::Tau,
+                    });
                     let mut tau_seen = false;
                     children.retain(|c| {
                         if *c == tau {
-                            if tau_seen { return false; }
+                            if tau_seen {
+                                return false;
+                            }
                             tau_seen = true;
                         }
                         true
@@ -153,22 +157,11 @@ impl Node {
     }
 }
 
-impl std::fmt::Display for OperatorType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OperatorType::Sequence       => write!(f, "SEQ"),
-            OperatorType::ExclusiveChoice => write!(f, "XOR"),
-            OperatorType::Concurrency    => write!(f, "AND"),
-            OperatorType::Loop           => write!(f, "LOOP"),
-        }
-    }
-}
-
 impl std::fmt::Display for LeafLabel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LeafLabel::Activity(s) => write!(f, "{s}"),
-            LeafLabel::Tau         => write!(f, "tau"),
+            LeafLabel::Tau => write!(f, "tau"),
         }
     }
 }
@@ -182,8 +175,8 @@ impl std::fmt::Display for Leaf {
 impl std::fmt::Display for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Node::Leaf(leaf)     => write!(f, "{leaf}"),
-            Node::Operator(op)   => write!(f, "{op}"),
+            Node::Leaf(leaf) => write!(f, "{leaf}"),
+            Node::Operator(op) => write!(f, "{op}"),
         }
     }
 }
@@ -192,7 +185,9 @@ impl std::fmt::Display for Operator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}(", self.operator_type)?;
         for (i, child) in self.children.iter().enumerate() {
-            if i > 0 { write!(f, ", ")?; }
+            if i > 0 {
+                write!(f, ", ")?;
+            }
             write!(f, "{child}")?;
         }
         write!(f, ")")
@@ -240,6 +235,7 @@ impl OperatorType {
             OperatorType::Sequence
                 | OperatorType::ExclusiveChoice
                 | OperatorType::Concurrency
+                | OperatorType::InclusiveChoice
         )
     }
 }
@@ -829,7 +825,7 @@ mod tests {
 
     #[test]
     fn fold_flat_sequence_unchanged() {
-        // SEQ(a, b, c) has no nested SEQ — the tree must be returned as-is.
+        // SEQ(a, b, c) has no nested SEQ, so the tree must be returned as-is.
         let mut seq = Operator::new(OperatorType::Sequence);
         seq.children.push(Node::new_leaf(Some("a".into())));
         seq.children.push(Node::new_leaf(Some("b".into())));
@@ -930,7 +926,7 @@ mod tests {
 
     #[test]
     fn fold_does_not_merge_different_operators() {
-        // SEQ(XOR(a, b), c)  — different operator, must stay unchanged.
+        // SEQ(XOR(a, b), c): a different operator, so it stays unchanged.
         // Build two identical XOR nodes: one for the input, one for expected.
         let make_inner = || {
             let mut xor = Operator::new(OperatorType::ExclusiveChoice);
@@ -947,13 +943,15 @@ mod tests {
 
         let mut expected_outer = Operator::new(OperatorType::Sequence);
         expected_outer.children.push(Node::Operator(make_inner()));
-        expected_outer.children.push(Node::new_leaf(Some("c".into())));
+        expected_outer
+            .children
+            .push(Node::new_leaf(Some("c".into())));
         assert_eq!(pt.root, Node::Operator(expected_outer));
     }
 
     #[test]
     fn fold_does_not_merge_loop() {
-        // LOOP(LOOP(a, tau), tau)  — Loop is not associative, must stay unchanged.
+        // LOOP(LOOP(a, tau), tau): Loop is not associative, so it stays unchanged.
         let make_inner = || {
             let mut lp = Operator::new(OperatorType::Loop);
             lp.children.push(Node::new_leaf(Some("a".into())));
