@@ -17,6 +17,9 @@ pub use index_linked_ocel::IndexLinkedOCEL;
 /// An [`OCEL`] linked through object/event identifiers (i.e., [`String`]s)
 pub mod id_linked_ocel;
 pub mod slim_linked_ocel;
+
+/// Reverse-E2O lookups grouped by event type
+pub(crate) mod e2o_rev_type_index;
 pub use id_linked_ocel::IDLinkedOCEL;
 pub use slim_linked_ocel::SlimLinkedOCEL;
 

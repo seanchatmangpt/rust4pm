@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Fixed a regression in OC-DECLARE discovery/conformance runtime performance:
+  - Now builds and construct a reverse-E2O index grouped by event type
+  - OC-DECLARE internals are no longer public; their arguments could only be produced by other internals (**Breaking**)
+    - `conformance::oc_declare::{get_evs_with_objs_perf, get_for_ev_perf, get_for_all_evs_perf, get_for_all_evs_perf_thresh}`
+    - `discovery::object_centric::oc_declare::{get_oi_labels, combine_constraints}`
+    - Per-arc checking is unchanged: `oc_declare_conformance`, `OCDeclareArc::violation_fraction`, `OCDeclareArc::satisfies_threshold`
+  - `OCDeclareArc::get_for_all_evs_perf` -> `violation_fraction`, `OCDeclareArc::get_for_all_evs_perf_thresh` -> `satisfies_threshold` (**Breaking**)
+  - Fixed `ANY` object involvements counting a target event once per referenced object instead of once
+
 ## 0.6.0
 
 - Optimal Petri net alignments (`conformance::alignments`):
