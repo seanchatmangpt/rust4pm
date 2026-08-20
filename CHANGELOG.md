@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 - **Breaking:** Removed `KuzuDB` export (the `kuzudb` feature, the `core::event_data::object_centric::graph_db` module and the `ocel_kuzudb_export` example). Kuzu is no longer maintained upstream.
 - Added extraction blueprints (`extraction-blueprint`): A declarative model for building an OCEL from relational data, with a row executor, a SQL-view compiler, a validator, and in-memory and `DuckDB` sinks
   - Feature `extraction-dbcon` adds a `RowProvider` over SQLite, CSV and Parquet via `dbcon`, all readable from bytes and buildable for `wasm32`
