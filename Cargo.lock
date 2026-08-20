@@ -1103,9 +1103,9 @@ dependencies = [
 
 [[package]]
 name = "dbcon"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a032a3800982b3848bfcfe8ce674f5c299507deccc1d4697c514be41b4370210"
+checksum = "e8a30c7fecab2cccb75a38cf2fe1a75ab8e203f70277d086740881a92893b3ca"
 dependencies = [
  "anyhow",
  "bytes",
