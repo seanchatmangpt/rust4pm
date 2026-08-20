@@ -1,6 +1,28 @@
 # Changelog
 
 ## Unreleased
+- **Breaking:** Removed `KuzuDB` export (the `kuzudb` feature, the `core::event_data::object_centric::graph_db` module and the `ocel_kuzudb_export` example). Kuzu is no longer maintained upstream.
+- Added extraction blueprints (`extraction-blueprint`): A declarative model for building an OCEL from relational data, with a row executor, a SQL-view compiler, a validator, and in-memory and `DuckDB` sinks
+  - Feature `extraction-dbcon` adds a `RowProvider` over SQLite, CSV and Parquet via `dbcon`, all readable from bytes and buildable for `wasm32`
+  - Feature `extraction-dbcon-postgres` adds PostgreSQL, which needs `sqlx` and is native-only
+- Added the OCEL 2.0 bundled CSV/Parquet format (`ocel-bundle`, plus `ocel-bundle-parquet` for Parquet storage): An `.ocel.zip` archive or a directory with the same layout, read and written through `Importable`/`Exportable` like any other OCEL format
+  - `Exportable::export_to_path_as` writes to a path in an explicitly named format, for paths that cannot carry one (e.g., a directory)
+  - Snappy-compressed Parquet is now readable, which is what most other Parquet writers emit by default
+- OCEL 2.0 CSV tweaks
+  - An event attribute column is written under its plain name; the `ea:` prefix is no longer produced on export, and any column that is not `id`, `activity`, `timestamp` or `ot:<X>` is an event attribute. Import still strips a leading `ea:` so older files read unchanged
+  - An object id or qualifier containing `/`, `#`, `{` or `\` is escaped with a backslash on export and read back on import
+  - An `ot:<X>` header names the object type exactly, and an event attribute value is kept as written; both were trimmed before
+  - A value is only read as a number or an instant when its text is the canonical spelling of one; `007`, `+7`, `1e3`, an integer too large for `i64`, and a timestamp with no timezone stay strings
+  - `strict` rejects an o2o row whose source object has no declared type; the check sat inside a `verbose` branch, so `strict` alone dropped the row silently
+- Added the `ocel_dataset_crosscheck` example: walks a directory of dataset folders, each holding the log it started from under `source/` and its re-exports (`.ocel.zip`, `.ocel.csv`, `.json`, `.xml`, `.sqlite`) beside it, reads every re-export back and reports where it disagrees with the source, separating differences in values from ones only in the attribute variant or recorded time
+- `ocel_sql` exposes the `DuckDB` consolidated schema: `DuckDbLinkedOCEL`, `stream_ocel_file_to_duckdb` / `_with`, `DuckDbImportOptions`, and `read_consolidated_ocel_from_duckdb_path` / `read_consolidated_slim_ocel_from_duckdb_path`
+- `SqlOcelImportOptions` with `import_ocel_sqlite_from_con_with_options` / `import_ocel_sqlite_from_path_with_options` / `import_ocel_duckdb_from_con_with_options`
+- An object-type table without its `ocel_changed_field` column is now read as initial state (configurable with `allow_missing_changed_field: false`)
+- `StreamImportOCEL` streams a reader or a path into any `AppendableOCEL` and finalizes it; `is_streaming_format` reports which formats it covers
+- `TabularSource` holds the bytes of a tabular file (`SQLite`, CSV, Parquet, workbook) in the registry, so a binding can name a dropped file by id where there is no filesystem
+- `OCELAttributeType::coalesce`: the narrowest type covering two others, used by CSV type inference
+- `OCELEvent.time` accepts the non-RFC3339 timestamp formats the rest of the crate parses
+- `AggregatedEventTimestamps::bin_width_ms` (new field) makes the bin width explicit: the spacing of the bin centers, and `0` when there are no bins; before it was implicit and a caller re-deriving it could disagree with the centers (**Breaking**)
 
 - Fixed a regression in OC-DECLARE discovery/conformance runtime performance:
   - Now builds and construct a reverse-E2O index grouped by event type

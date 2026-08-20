@@ -660,6 +660,7 @@ fn get_direct_or_indirect_object_involvements<'a>(
 /// Reduce OC-DECLARE arcs based on lossless/lossy transitive reduction
 /// considering paths of arbitrary length.
 /// Uses sequential processing to prevent mutual elimination in cycles.
+#[register_binding]
 pub fn reduce_oc_arcs(mut arcs: Vec<OCDeclareArc>, lossless: bool) -> Vec<OCDeclareArc> {
     // Sorting ensures deterministic processing order
     arcs.sort();
@@ -810,6 +811,7 @@ fn compose_arc_labels(l1: &OCDeclareArcLabel, l2: &OCDeclareArcLabel) -> OCDecla
 ///
 /// BFSs from every target activity through non-target intermediaries, composing
 /// arc types and labels along the way.
+#[register_binding]
 pub fn project_oc_arcs(
     arcs: Vec<OCDeclareArc>,
     activities: &HashSet<String>,
