@@ -171,7 +171,7 @@ impl Importable for OCEL {
             Some("json".to_string())
         } else if p.ends_with(".xml") || p.ends_with(".xmlocel") {
             Some("xml".to_string())
-        } else if p.ends_with(".sqlite") || p.ends_with(".db") {
+        } else if p.ends_with(".sqlite") || p.ends_with(".sqlite3") || p.ends_with(".db") {
             Some("sqlite".to_string())
         } else if p.ends_with(".duckdb") {
             Some("duckdb".to_string())

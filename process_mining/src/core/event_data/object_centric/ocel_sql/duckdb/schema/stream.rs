@@ -4,17 +4,20 @@ use std::path::Path;
 
 use duckdb::Connection;
 
-use crate::core::event_data::object_centric::appendable::{AppendableOCEL, StreamImportOCEL};
+use crate::core::event_data::object_centric::appendable::{
+    is_streaming_format, AppendableOCEL, StreamImportOCEL,
+};
 use crate::core::event_data::object_centric::io::OCELIOError;
 use crate::core::event_data::object_centric::linked_ocel::SlimLinkedOCEL;
 use crate::core::event_data::object_centric::ocel_struct::OCEL;
 use crate::core::event_data::object_centric::ocel_xml::OCELImportOptions;
 use crate::core::event_data::object_centric::readable::ReadableOCEL;
-use crate::core::io::infer_format_from_path;
+use crate::core::io::Importable;
 use macros_process_mining::register_binding;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::reader::{is_consolidated_schema, DuckDbReadInto};
 use super::sink::DuckDbOcelSink;
 use super::tables::{create_indexes, create_schema};
 
@@ -164,8 +167,11 @@ fn write_slim_ocel_to_duckdb_binding(
     write_ocel_to_duckdb_with(ocel, db_path, options)
 }
 
-/// Stream an OCEL file into a fresh `DuckDB` database, dispatching by extension: `.json`,
-/// `.xml`, `.sqlite`/`.db`/`.sqlite3` (and `.gz` variants).
+/// Stream an OCEL file into a fresh `DuckDB` database.
+///
+/// Accepts every format [`OCEL`] imports from. `.json`, `.xml` (and their `.gz` variants),
+/// bundles and a `.duckdb` in this schema stream into the database. `.sqlite`, `.ocel.csv` and a
+/// `.duckdb` in the OCEL 2.0 per-type layout are materialized into an [`OCEL`] first.
 ///
 /// Read the result back with
 /// [`read_ocel_from_duckdb`](super::reader::read_ocel_from_duckdb) or
@@ -197,30 +203,45 @@ pub fn stream_ocel_file_to_duckdb_with(
 ) -> Result<(), OCELIOError> {
     let src = src_path.as_ref();
     let db_path = db_path.as_ref();
-    let format = infer_format_from_path(src).ok_or_else(|| {
+    // The destination is recreated from scratch, so a source at the same path would be deleted
+    // out from under the read.
+    if let (Ok(from), Ok(to)) = (src.canonicalize(), db_path.canonicalize()) {
+        if from == to {
+            return Err(OCELIOError::Other(format!(
+                "the source and the destination are the same file: {}",
+                db_path.display()
+            )));
+        }
+    }
+    // A bundle is a directory or an `ocel-meta.json` manifest, which a bare extension lookup
+    // reads as plain OCEL JSON.
+    let format = <OCEL as Importable>::infer_format(src).ok_or_else(|| {
         OCELIOError::UnsupportedFormat(format!("cannot infer OCEL format from {src:?}"))
     })?;
-    match format.as_str() {
-        // SQLite is materialized to a full OCEL then fed to the sink (see `sqlite_source`),
-        // not truly streamed.
-        "sqlite" | "db" | "sqlite3" => {
-            #[cfg(feature = "ocel-sqlite")]
-            {
-                super::sqlite_source::stream_ocel_sqlite_to_duckdb(src, db_path, options)
-            }
-            #[cfg(not(feature = "ocel-sqlite"))]
-            {
-                Err(OCELIOError::Other(
-                    "ocel-sqlite feature required for .sqlite source".into(),
-                ))
-            }
-        }
-        // Everything else (`json`/`xml` and their `.gz` variants) streams into the sink;
-        // `stream_ocel_from_reader` validates the format and rejects unsupported ones.
-        _ => run_import(db_path, options, |sink| {
+    if is_streaming_format(&format) {
+        return run_import(db_path, options, |sink| {
             sink.stream_ocel_from_reader(File::open(src)?, &format, OCELImportOptions::default())
-        }),
+        });
     }
+    // A bundle reads table by table into the sink, so it holds no log in memory either.
+    #[cfg(feature = "ocel-bundle")]
+    if format.ends_with("zip") {
+        return run_import(db_path, options, |sink| {
+            crate::core::event_data::object_centric::ocel_bundle::Container::open(src)?
+                .read_into(sink)
+        });
+    }
+    // A source already in this schema reads straight into the sink. The per-type layout also
+    // spells itself `.duckdb`, so the tables decide.
+    if format == "duckdb" {
+        let src_con = Connection::open(src)?;
+        if is_consolidated_schema(&src_con)? {
+            return run_import(db_path, options, |sink| sink.read_from_duckdb(&src_con));
+        }
+    }
+    // The rest (`sqlite`, `ocel.csv`, a per-type `.duckdb`) only has importers that return an
+    // `OCEL`, and going through a `SlimLinkedOCEL` here would build two logs instead of none.
+    write_ocel_to_duckdb_with(&OCEL::import_from_path(src)?, db_path, options)
 }
 
 #[cfg(test)]
@@ -228,6 +249,132 @@ mod tests {
     use super::*;
     use crate::core::event_data::object_centric::ocel_json::import_ocel_json_path;
     use crate::test_utils::get_test_data_path;
+
+    /// Event and object counts in `db_path`.
+    fn counts(db_path: &Path) -> (usize, usize) {
+        let con = Connection::open(db_path).unwrap();
+        let n_ev: i64 = con
+            .query_row("SELECT count(*) FROM events", [], |r| r.get(0))
+            .unwrap();
+        let n_ob: i64 = con
+            .query_row("SELECT count(*) FROM objects", [], |r| r.get(0))
+            .unwrap();
+        (n_ev as usize, n_ob as usize)
+    }
+
+    #[test]
+    #[cfg(feature = "ocel-sqlite")]
+    fn sqlite_stream_roundtrip_counts() {
+        use crate::core::event_data::object_centric::ocel_sql::import_ocel_sqlite_from_path;
+
+        let src = get_test_data_path()
+            .join("ocel")
+            .join("order-management.sqlite");
+        let reference = import_ocel_sqlite_from_path(&src).unwrap();
+        let out = get_test_data_path()
+            .join("export")
+            .join("stream-from-sqlite.duckdb");
+        let _ = std::fs::remove_file(&out);
+        stream_ocel_file_to_duckdb(&src, &out).unwrap();
+        assert_eq!(
+            counts(&out),
+            (reference.events.len(), reference.objects.len())
+        );
+    }
+
+    /// A source in this schema goes through `read_from_duckdb`, so it must arrive whole.
+    #[test]
+    fn consolidated_duckdb_source_reads_into_the_sink() {
+        let src = get_test_data_path()
+            .join("ocel")
+            .join("order-management.json");
+        let reference = import_ocel_json_path(&src).unwrap();
+        let first = get_test_data_path()
+            .join("export")
+            .join("consolidated-source.duckdb");
+        let second = get_test_data_path()
+            .join("export")
+            .join("consolidated-copy.duckdb");
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+        stream_ocel_file_to_duckdb(&src, &first).unwrap();
+
+        assert!(is_consolidated_schema(&Connection::open(&first).unwrap()).unwrap());
+        stream_ocel_file_to_duckdb(&first, &second).unwrap();
+        assert_eq!(
+            counts(&second),
+            (reference.events.len(), reference.objects.len())
+        );
+
+        // The import recreates the destination, so a source at that path would be gone before
+        // the read.
+        let err = stream_ocel_file_to_duckdb(&second, &second).unwrap_err();
+        assert!(
+            err.to_string().contains("the same file"),
+            "{err}, and {} still exists: {}",
+            second.display(),
+            second.exists()
+        );
+    }
+
+    /// Reaching a bundle at all depends on the format inference. A directory has no extension,
+    /// and the manifest's `.json` names a file that is not an OCEL JSON.
+    #[test]
+    #[cfg(feature = "ocel-bundle")]
+    fn bundle_dir_manifest_and_archive_all_import() {
+        use crate::core::event_data::object_centric::ocel_bundle::{
+            export_ocel_bundle, BundleExportOptions, ContainerLayout, StorageFormat, META_FILE_NAME,
+        };
+
+        let reference = import_ocel_json_path(
+            get_test_data_path()
+                .join("ocel")
+                .join("order-management.json"),
+        )
+        .unwrap();
+        let expected = (reference.events.len(), reference.objects.len());
+
+        let storages = [
+            StorageFormat::Csv,
+            #[cfg(feature = "ocel-bundle-parquet")]
+            StorageFormat::Parquet,
+        ];
+        for storage in storages {
+            let work = get_test_data_path()
+                .join("export")
+                .join(format!("bundle-to-duckdb-{storage:?}"));
+            let _ = std::fs::remove_dir_all(&work);
+            let as_dir = work.join("container");
+            std::fs::create_dir_all(&as_dir).unwrap();
+            export_ocel_bundle(
+                &reference,
+                &as_dir,
+                BundleExportOptions {
+                    layout: ContainerLayout::Directory,
+                    storage,
+                },
+            )
+            .unwrap();
+            let as_zip = work.join("container.ocel.zip");
+            export_ocel_bundle(
+                &reference,
+                &as_zip,
+                BundleExportOptions {
+                    layout: ContainerLayout::Archive,
+                    storage,
+                },
+            )
+            .unwrap();
+
+            for src in [as_dir.clone(), as_dir.join(META_FILE_NAME), as_zip] {
+                let out = work.join("out.duckdb");
+                let _ = std::fs::remove_file(&out);
+                stream_ocel_file_to_duckdb(&src, &out)
+                    .unwrap_or_else(|e| panic!("{storage:?} {}: {e}", src.display()));
+                assert_eq!(counts(&out), expected, "{storage:?} {}", src.display());
+            }
+        }
+    }
 
     #[test]
     fn json_stream_roundtrip_counts() {

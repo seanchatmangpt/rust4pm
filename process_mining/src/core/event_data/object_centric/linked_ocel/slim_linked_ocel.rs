@@ -1774,12 +1774,21 @@ impl Importable for SlimLinkedOCEL {
             let mut slim = SlimLinkedOCEL::new();
             slim.stream_ocel_from_reader(reader, format, OCELImportOptions::default())?;
             slim.finalize()?;
-            Ok(slim)
-        } else {
-            Ok(SlimLinkedOCEL::from_ocel(OCEL::import_from_reader(
-                reader, format,
-            )?))
+            return Ok(slim);
         }
+        #[cfg(feature = "ocel-bundle")]
+        if format.ends_with("zip") {
+            let mut reader = reader;
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            let mut slim = SlimLinkedOCEL::new();
+            crate::core::event_data::object_centric::ocel_bundle::Container::open_bytes(&bytes)?
+                .read_into(&mut slim)?;
+            return Ok(slim);
+        }
+        Ok(SlimLinkedOCEL::from_ocel(OCEL::import_from_reader(
+            reader, format,
+        )?))
     }
 
     fn import_from_path_with_options<P: AsRef<Path>>(
@@ -1801,15 +1810,19 @@ impl Importable for SlimLinkedOCEL {
                 OCELImportOptions::default(),
             )?;
             slim.finalize()?;
-            Ok(slim)
-        } else {
-            // Formats needing true path access (a directory/`.ocel.zip` bundle, SQLite, DuckDB)
-            // only work through `OCEL`'s path-aware importer. The default `Importable` impl
-            // would instead `File::open` the path and hand it to `import_from_reader_with_options`
-            // as a flat byte stream, which fails outright for a directory and silently
-            // misinterprets a bundle's manifest file as the archive itself.
-            Ok(SlimLinkedOCEL::from_ocel(OCEL::import_from_path(path)?))
+            return Ok(slim);
         }
+        // A bundle is a directory, or an `ocel-meta.json` naming one, so it needs the path
+        // itself and not a byte stream.
+        #[cfg(feature = "ocel-bundle")]
+        if format.ends_with("zip") {
+            let mut slim = SlimLinkedOCEL::new();
+            crate::core::event_data::object_centric::ocel_bundle::Container::open(path)?
+                .read_into(&mut slim)?;
+            return Ok(slim);
+        }
+        // SQLite and DuckDB have no sink-based reader, so their importer's `OCEL` is the way in.
+        Ok(SlimLinkedOCEL::from_ocel(OCEL::import_from_path(path)?))
     }
 
     fn infer_format(path: &Path) -> Option<String> {

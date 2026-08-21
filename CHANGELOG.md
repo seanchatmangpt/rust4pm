@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.2
+- `stream_ocel_file_to_duckdb` / `_with` infer the format the way `OCEL` does and accept every format it imports from, bundles included
+  - `.json`/`.xml` (and `.gz`), bundles, and a `DuckDB` source in the consolidated schema stream into the database, holding no log in memory
+  - `.sqlite`, `.ocel.csv` and a `.duckdb` in the OCEL 2.0 per-type layout are materialized first (no streaming support yet)
+  - Importing onto the source's own path is now an error instead of deleting the source
+- `Container::read_into` reads a bundle into any `AppendableOCEL` sink, skipping the intermediate `OCEL`. `Container::read` and `SlimLinkedOCEL`'s bundle import both go through it
+- A bundle manifest path pointing outside the container is rejected before any table is read
+- `OCEL`'s format inference recognizes `.sqlite3` as SQLite, alongside `.sqlite` and `.db`
+
 ## 0.6.1
 - **Breaking:** Removed `KuzuDB` export (the `kuzudb` feature, the `core::event_data::object_centric::graph_db` module and the `ocel_kuzudb_export` example). Kuzu is no longer maintained upstream.
 - Added extraction blueprints (`extraction-blueprint`): A declarative model for building an OCEL from relational data, with a row executor, a SQL-view compiler, a validator, and in-memory and `DuckDB` sinks

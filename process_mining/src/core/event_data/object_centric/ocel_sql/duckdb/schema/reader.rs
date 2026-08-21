@@ -59,6 +59,20 @@ pub fn read_consolidated_slim_ocel_from_duckdb_path(
     SlimLinkedOCEL::from_duckdb(&con)
 }
 
+/// Whether `con` holds the consolidated schema instead of the OCEL 2.0 per-type layout.
+///
+/// Both are written to a `.duckdb`, so only the tables tell them apart. These five are fixed by
+/// [`create_schema`](super::tables::create_schema), and the per-type layout has none of them.
+pub(crate) fn is_consolidated_schema(con: &Connection) -> Result<bool, duckdb::Error> {
+    let found: i64 = con.query_row(
+        "SELECT count(*) FROM duckdb_tables() WHERE table_name IN \
+         ('events', 'objects', 'e2o', 'o2o', 'event_attr_meta')",
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(found == 5)
+}
+
 /// Read a `DuckDB` schema database into any [`AppendableOCEL`] sink.
 ///
 /// Currently buffers `e2o`/`o2o` relationships and object attributes into maps.

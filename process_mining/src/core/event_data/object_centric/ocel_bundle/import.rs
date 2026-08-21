@@ -12,7 +12,7 @@
 //! uncompressed. Peak memory stays flat either way; an archive additionally costs disk for its
 //! expanded size, freed when the [`Container`] drops.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -22,9 +22,11 @@ use super::meta::{
     columns, epoch, type_attributes, BundleMeta, StorageFormat, Value, BUNDLE_FORMAT_VERSION,
     META_FILE_NAME, OCEL_VERSION,
 };
+use crate::core::event_data::object_centric::appendable::AppendableOCEL;
+use crate::core::event_data::object_centric::io::OCELIOError;
 use crate::core::event_data::object_centric::{
-    OCELAttributeType, OCELAttributeValue, OCELEvent, OCELEventAttribute, OCELObject,
-    OCELObjectAttribute, OCELRelationship, OCELType, OCEL,
+    OCELAttributeType, OCELAttributeValue, OCELEventAttribute, OCELObjectAttribute,
+    OCELRelationship, OCELType, OCEL,
 };
 use crate::core::event_data::timestamp_utils::parse_timestamp;
 
@@ -254,6 +256,9 @@ impl Container {
 
     /// Read the whole container into an [`OCEL`].
     ///
+    /// Prefer [`read_into`](Self::read_into) when the target is not an [`OCEL`]. This holds the
+    /// whole log in memory.
+    ///
     /// # Errors
     /// See [`BundleImportError`].
     pub fn read(&self) -> Result<OCEL, BundleImportError> {
@@ -263,82 +268,83 @@ impl Container {
             events: Vec::new(),
             objects: Vec::new(),
         };
+        self.read_into(&mut ocel).map_err(|e| match e {
+            OCELIOError::BundleImport(e) => e,
+            // `OCEL`'s sink is `Infallible`, so nothing else reaches here.
+            other => BundleImportError::Container(other.to_string()),
+        })?;
+        Ok(ocel)
+    }
 
-        for (ty, decl) in &self.meta.event_types {
-            ocel.event_types.push(OCELType {
-                name: ty.clone(),
-                attributes: type_attributes(&decl.attributes),
-            });
-            for row in self.table(&decl.file, &[columns::ID, columns::TIME])? {
-                let id = row.text(columns::ID, &decl.file)?;
-                let time = row.time(columns::TIME, &decl.file)?;
-                ocel.events.push(OCELEvent {
-                    id,
-                    event_type: ty.clone(),
-                    time,
-                    attributes: decl
-                        .attributes
-                        .iter()
-                        .filter_map(|a| {
-                            row.value(&a.name, a.value_type.into()).map(|value| {
-                                OCELEventAttribute {
-                                    name: a.name.clone(),
-                                    value,
-                                }
-                            })
-                        })
-                        .collect(),
-                    relationships: Vec::new(),
-                });
+    /// Read the whole container into `sink`, holding no intermediate log.
+    ///
+    /// Relations and attribute changes live in their own tables but are needed when an entity is
+    /// appended, so this indexes them first and then streams the entity tables through.
+    ///
+    /// # Errors
+    /// See [`BundleImportError`], plus the sink's own error.
+    pub fn read_into<A>(&self, sink: &mut A) -> Result<(), OCELIOError>
+    where
+        A: AppendableOCEL,
+        A::Error: Into<OCELIOError>,
+    {
+        // Checked before any table is read, so an escaping path is reported as such even when an
+        // earlier table is missing.
+        for (_, file) in self.meta.tables() {
+            if !is_contained(file) {
+                return Err(BundleImportError::Table {
+                    file: file.to_string(),
+                    detail: "a declared path must stay inside the container".to_string(),
+                }
+                .into());
             }
         }
 
-        // Object rows first, so a change row always has an object to append to.
-        let mut object_at: HashMap<String, usize> = HashMap::new();
-        for (ty, decl) in &self.meta.object_types {
-            ocel.object_types.push(OCELType {
-                name: ty.clone(),
-                attributes: type_attributes(&decl.attributes),
-            });
-            for row in self.table(&decl.file, &[columns::ID])? {
-                let id = row.text(columns::ID, &decl.file)?;
-                object_at.insert(id.clone(), ocel.objects.len());
-                ocel.objects.push(OCELObject {
-                    id,
-                    object_type: ty.clone(),
-                    // An object table's values are the ones in force from the epoch.
-                    attributes: decl
-                        .attributes
-                        .iter()
-                        .filter_map(|a| {
-                            row.value(&a.name, a.value_type.into()).map(|value| {
-                                OCELObjectAttribute {
-                                    name: a.name.clone(),
-                                    value,
-                                    time: epoch(),
-                                }
-                            })
-                        })
-                        .collect(),
-                    relationships: Vec::new(),
+        // Only the endpoint a relation is stored on is checked. The other is kept as the id it
+        // is, which is what an OCEL relationship holds anyway.
+        let e2o_file = &self.meta.relations.e2o;
+        let mut e2o: HashMap<String, Vec<OCELRelationship>> = HashMap::new();
+        for row in self.table(
+            e2o_file,
+            &[columns::EVENT_ID, columns::OBJECT_ID, columns::QUALIFIER],
+        )? {
+            e2o.entry(row.text(columns::EVENT_ID, e2o_file)?)
+                .or_default()
+                .push(OCELRelationship {
+                    object_id: row.text(columns::OBJECT_ID, e2o_file)?,
+                    qualifier: row.text_or_empty(columns::QUALIFIER),
                 });
-            }
         }
 
+        let o2o_file = &self.meta.relations.o2o;
+        let mut o2o: HashMap<String, Vec<OCELRelationship>> = HashMap::new();
+        for row in self.table(
+            o2o_file,
+            &[columns::SOURCE_ID, columns::TARGET_ID, columns::QUALIFIER],
+        )? {
+            o2o.entry(row.text(columns::SOURCE_ID, o2o_file)?)
+                .or_default()
+                .push(OCELRelationship {
+                    object_id: row.text(columns::TARGET_ID, o2o_file)?,
+                    qualifier: row.text_or_empty(columns::QUALIFIER),
+                });
+        }
+
+        // `changed_at` keeps the file each id was named in, so a dangling change row can still
+        // name where it came from.
+        let mut changes: HashMap<String, Vec<OCELObjectAttribute>> = HashMap::new();
+        let mut changed_at: HashMap<String, &str> = HashMap::new();
+        let mut unknown_fields: Vec<(&str, Dangling)> = Vec::new();
         for decl in self.meta.object_types.values() {
             let Some(file) = &decl.changes_file else {
                 continue;
             };
-            let mut unknown_object = Dangling::default();
             let mut unknown_field = Dangling::default();
             for row in self.table(file, &[columns::ID, columns::TIME, columns::CHANGED_FIELD])? {
                 let id = row.text(columns::ID, file)?;
                 let time = row.time(columns::TIME, file)?;
                 let name = row.text(columns::CHANGED_FIELD, file)?;
-                let Some(&at) = object_at.get(&id) else {
-                    unknown_object.note(&id);
-                    continue;
-                };
+                changed_at.entry(id.clone()).or_insert(file);
                 // Only the column `ocel_changed_field` names. The rest of a change row is empty
                 // by construction, and reading them would record changes the container never
                 // declared.
@@ -347,62 +353,129 @@ impl Container {
                     continue;
                 };
                 if let Some(value) = row.value(&name, a.value_type.into()) {
-                    ocel.objects[at]
-                        .attributes
+                    changes
+                        .entry(id)
+                        .or_default()
                         .push(OCELObjectAttribute { name, value, time });
                 }
             }
-            unknown_object.into_error(file, "no object table declares the object")?;
+            unknown_fields.push((file, unknown_field));
+        }
+
+        for (ty, decl) in &self.meta.event_types {
+            sink.declare_event_type(OCELType {
+                name: ty.clone(),
+                attributes: type_attributes(&decl.attributes),
+            })
+            .map_err(Into::into)?;
+        }
+        for (ty, decl) in &self.meta.object_types {
+            sink.declare_object_type(OCELType {
+                name: ty.clone(),
+                attributes: type_attributes(&decl.attributes),
+            })
+            .map_err(Into::into)?;
+        }
+
+        for (ty, decl) in &self.meta.event_types {
+            for row in self.table(&decl.file, &[columns::ID, columns::TIME])? {
+                let id = row.text(columns::ID, &decl.file)?;
+                let time = row.time(columns::TIME, &decl.file)?;
+                let attributes = decl
+                    .attributes
+                    .iter()
+                    .filter_map(|a| {
+                        row.value(&a.name, a.value_type.into())
+                            .map(|value| OCELEventAttribute {
+                                name: a.name.clone(),
+                                value,
+                            })
+                    })
+                    .collect();
+                let relationships = e2o.remove(&id).unwrap_or_default();
+                sink.append_event(id, ty, time, attributes, relationships)
+                    .map_err(Into::into)?;
+            }
+        }
+
+        for (ty, decl) in &self.meta.object_types {
+            for row in self.table(&decl.file, &[columns::ID])? {
+                let id = row.text(columns::ID, &decl.file)?;
+                // An object table's values are the ones in force from the epoch; a change row
+                // adds the later ones.
+                let mut attributes: Vec<_> = decl
+                    .attributes
+                    .iter()
+                    .filter_map(|a| {
+                        row.value(&a.name, a.value_type.into())
+                            .map(|value| OCELObjectAttribute {
+                                name: a.name.clone(),
+                                value,
+                                time: epoch(),
+                            })
+                    })
+                    .collect();
+                attributes.extend(changes.remove(&id).unwrap_or_default());
+                changed_at.remove(&id);
+                let relationships = o2o.remove(&id).unwrap_or_default();
+                sink.append_object(id, ty, attributes, relationships)
+                    .map_err(Into::into)?;
+            }
+        }
+
+        // Whatever the indexes still hold named an entity no table declared.
+        for (file, unknown_field) in unknown_fields {
+            let left: HashSet<&str> = changed_at
+                .iter()
+                .filter(|(_, from)| **from == file)
+                .map(|(id, _)| id.as_str())
+                .collect();
+            self.report_dangling(
+                file,
+                columns::ID,
+                &left,
+                "no object table declares the object",
+            )?;
             unknown_field.into_error(file, "the manifest declares no attribute")?;
         }
+        self.report_dangling(
+            e2o_file,
+            columns::EVENT_ID,
+            &e2o.keys().map(String::as_str).collect(),
+            "no event table declares the event",
+        )?;
+        self.report_dangling(
+            o2o_file,
+            columns::SOURCE_ID,
+            &o2o.keys().map(String::as_str).collect(),
+            "no object table declares the object",
+        )?;
+        sink.finalize().map_err(Into::into)?;
+        Ok(())
+    }
 
-        // Only the endpoint a relation is stored on is checked. The other is kept as the id it
-        // is, which is what an OCEL relationship holds anyway.
-        let e2o = &self.meta.relations.e2o;
-        let event_at: HashMap<String, usize> = ocel
-            .events
-            .iter()
-            .enumerate()
-            .map(|(i, ev)| (ev.id.clone(), i))
-            .collect();
-        let mut unknown_event = Dangling::default();
-        for row in self.table(
-            e2o,
-            &[columns::EVENT_ID, columns::OBJECT_ID, columns::QUALIFIER],
-        )? {
-            let event_id = row.text(columns::EVENT_ID, e2o)?;
-            let object_id = row.text(columns::OBJECT_ID, e2o)?;
-            let Some(&at) = event_at.get(&event_id) else {
-                unknown_event.note(&event_id);
-                continue;
-            };
-            ocel.events[at].relationships.push(OCELRelationship {
-                object_id,
-                qualifier: row.text_or_empty(columns::QUALIFIER),
-            });
+    /// Fail on the rows of `file` whose `key_column` is in `left_over`.
+    ///
+    /// Re-reads the table, on the error path only, so the message still names the first offending
+    /// row and counts the rest.
+    fn report_dangling(
+        &self,
+        file: &str,
+        key_column: &str,
+        left_over: &HashSet<&str>,
+        what: &str,
+    ) -> Result<(), BundleImportError> {
+        if left_over.is_empty() {
+            return Ok(());
         }
-        unknown_event.into_error(e2o, "no event table declares the event")?;
-
-        let o2o = &self.meta.relations.o2o;
-        let mut unknown_source = Dangling::default();
-        for row in self.table(
-            o2o,
-            &[columns::SOURCE_ID, columns::TARGET_ID, columns::QUALIFIER],
-        )? {
-            let source_id = row.text(columns::SOURCE_ID, o2o)?;
-            let object_id = row.text(columns::TARGET_ID, o2o)?;
-            let Some(&at) = object_at.get(&source_id) else {
-                unknown_source.note(&source_id);
-                continue;
-            };
-            ocel.objects[at].relationships.push(OCELRelationship {
-                object_id,
-                qualifier: row.text_or_empty(columns::QUALIFIER),
-            });
+        let mut dangling = Dangling::default();
+        for row in self.table(file, &[key_column])? {
+            let id = row.text(key_column, file)?;
+            if left_over.contains(id.as_str()) {
+                dangling.note(&id);
+            }
         }
-        unknown_source.into_error(o2o, "no object table declares the object")?;
-
-        Ok(ocel)
+        dangling.into_error(file, what)
     }
 
     /// The rows of one declared table, once it is known to carry every column in `fixed`.
