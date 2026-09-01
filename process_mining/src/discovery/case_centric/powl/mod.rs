@@ -20,8 +20,7 @@ use std::collections::{BTreeSet, HashSet};
 use macros_process_mining::register_binding;
 
 use crate::core::event_data::case_centric::EventLogClassifier;
-use crate::core::process_models::case_centric::powl::{Powl, PowlNode, PowlOperator};
-use crate::core::process_models::case_centric::process_tree::OperatorType;
+use crate::core::process_models::case_centric::powl::{ChoiceGraphNode, Powl, PowlNode};
 use crate::discovery::case_centric::dfg::discover_dfg_with_classifier;
 use crate::EventLog;
 
@@ -93,15 +92,15 @@ pub fn discover_powl(event_log: &EventLog) -> Powl {
     discover_powl_with_classifier(event_log, &EventLogClassifier::default())
 }
 
-/// Wraps `activity` in a `Loop(Leaf(activity), Leaf(tau))` operator if it self-loops in the DFG,
-/// otherwise returns a plain leaf. Mirrors the standard process-tree treatment of a directly
-/// self-following activity.
+/// Wraps `activity` in a POWL __2.0__ [`ChoiceGraphNode::self_looping`] if it self-loops in the
+/// DFG, otherwise returns a plain leaf. This is the choice-graph replacement for a
+/// block-structured `Loop(Leaf(activity), Leaf(tau))` operator -- a genuine cyclic graph over a
+/// single child, per Def. 3.6, rather than the POWL 1.0-era block operator.
 fn leaf_or_loop(activity: &str, self_loops: &HashSet<String>) -> PowlNode {
     if self_loops.contains(activity) {
-        let mut op = PowlOperator::new(OperatorType::Loop);
-        op.children.push(PowlNode::new_leaf(Some(activity.to_string())));
-        op.children.push(PowlNode::new_leaf(None));
-        PowlNode::Operator(op)
+        PowlNode::ChoiceGraph(ChoiceGraphNode::self_looping(PowlNode::new_leaf(Some(
+            activity.to_string(),
+        ))))
     } else {
         PowlNode::new_leaf(Some(activity.to_string()))
     }
@@ -211,5 +210,29 @@ mod tests {
         let net = powl.to_petri_net();
         assert!(net.transitions.len() >= powl.find_all_leaves().len());
         assert!(net.initial_marking.is_some());
+    }
+
+    #[test]
+    fn self_looping_activity_discovers_a_real_choice_graph() {
+        // "b" directly follows itself in a real trace -> discover_powl must wrap it in the POWL
+        // 2.0 ChoiceGraph self-loop, not a block-structured Loop operator.
+        let log = log_from_traces(vec![vec!["a", "b", "b", "c"]]);
+        let powl = discover_powl(&log);
+        let PowlNode::PartialOrder(po) = &powl.root else {
+            panic!("expected a PartialOrder root over {{a, b, c}}");
+        };
+        let b_index = po
+            .children
+            .iter()
+            .position(|c| matches!(c, PowlNode::ChoiceGraph(_)))
+            .expect("activity 'b' must be discovered as a ChoiceGraph (self-loop), not a Leaf/Operator");
+        let PowlNode::ChoiceGraph(cg) = &po.children[b_index] else {
+            unreachable!()
+        };
+        assert!(cg.is_valid());
+        assert!(cg
+            .edges
+            .contains(&(crate::core::process_models::case_centric::powl::ChoiceGraphEndpoint::Child(0),
+                         crate::core::process_models::case_centric::powl::ChoiceGraphEndpoint::Child(0))));
     }
 }
