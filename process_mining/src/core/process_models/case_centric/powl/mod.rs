@@ -558,20 +558,27 @@ mod tests {
     }
 
     #[test]
-    fn choice_graph_self_loop_is_valid_and_cyclic() {
-        // The POWL 2.0 replacement for a block-structured Loop(a, tau): a single child with a
-        // genuine cyclic edge back to itself.
-        let cg = ChoiceGraphNode::self_looping(PowlNode::new_leaf(Some("a".into())));
-        assert!(cg.is_valid());
-        assert!(cg.edges.contains(&(ChoiceGraphEndpoint::Child(0), ChoiceGraphEndpoint::Child(0))));
-    }
+    fn choice_graph_is_valid_across_cyclic_and_branching_topologies() {
+        // Same underlying property (Def. 3.6 validity: every child reachable from ▷ and
+        // can reach □) checked over two structurally distinct topologies -- merged from two
+        // formerly separate tests that both only asserted `is_valid()` on a well-formed
+        // graph, differing solely in surface topology.
 
-    #[test]
-    fn choice_graph_exclusive_choice_is_valid() {
-        // ▷ -> a -> □ and ▷ -> b -> □: a plain exclusive choice, expressed as a choice graph
-        // (POWL 2.0 generalizes ExclusiveChoice into this same construct).
+        // Cyclic: the POWL 2.0 replacement for a block-structured Loop(a, tau) -- a single
+        // child with a genuine cyclic edge back to itself.
+        let self_loop = ChoiceGraphNode::self_looping(PowlNode::new_leaf(Some("a".into())));
+        assert!(self_loop.is_valid());
+        assert!(self_loop
+            .edges
+            .contains(&(ChoiceGraphEndpoint::Child(0), ChoiceGraphEndpoint::Child(0))));
+
+        // Branching, acyclic: ▷ -> a -> □ and ▷ -> b -> □, a plain exclusive choice
+        // expressed as a choice graph (POWL 2.0 generalizes ExclusiveChoice into this same
+        // construct). This is the direct positive counterpart of
+        // `choice_graph_rejects_unreachable_node` below -- same two-child branching shape,
+        // but with both children actually reachable.
         use ChoiceGraphEndpoint::{Child, End, Start};
-        let cg = ChoiceGraphNode::new(
+        let exclusive_choice = ChoiceGraphNode::new(
             vec![
                 PowlNode::new_leaf(Some("a".into())),
                 PowlNode::new_leaf(Some("b".into())),
@@ -583,7 +590,7 @@ mod tests {
                 (Child(1), End),
             ],
         );
-        assert!(cg.is_valid());
+        assert!(exclusive_choice.is_valid());
     }
 
     #[test]

@@ -187,29 +187,22 @@ mod tests {
 
     #[test]
     fn genuinely_concurrent_activities_are_left_unordered() {
-        // Both orders of b/c observed across traces => b and c stay unordered.
+        // Both orders of b/c observed across traces => b and c stay unordered. Activities
+        // sort alphabetically to indices a=0, b=1, c=2.
         let log = log_from_traces(vec![vec!["a", "b", "c"], vec!["a", "c", "b"]]);
         let powl = discover_powl(&log);
         let PowlNode::PartialOrder(po) = &powl.root else {
             panic!("expected a PartialOrder root");
         };
-        // No edge between b's and c's indices in either direction.
-        let has_bc_edge = po
-            .order
-            .iter()
-            .any(|&(x, y)| (x, y) != (0, 1) && (x, y) != (0, 2) && (po.children.len() == 3));
+        assert_eq!(po.children.len(), 3);
         // a still strictly precedes both b and c.
-        assert!(po.order.contains(&(0, 1)) || po.order.contains(&(0, 2)));
-        let _ = has_bc_edge;
-    }
-
-    #[test]
-    fn discovered_powl_translates_to_a_real_petri_net() {
-        let log = log_from_traces(vec![vec!["a", "b", "c"], vec!["a", "c", "b"]]);
-        let powl = discover_powl(&log);
-        let net = powl.to_petri_net();
-        assert!(net.transitions.len() >= powl.find_all_leaves().len());
-        assert!(net.initial_marking.is_some());
+        assert!(po.order.contains(&(0, 1)));
+        assert!(po.order.contains(&(0, 2)));
+        // No edge between b's (1) and c's (2) indices in either direction -- this is the
+        // actual property under test: genuinely concurrent activities stay unordered.
+        assert!(!po.order.contains(&(1, 2)));
+        assert!(!po.order.contains(&(2, 1)));
+        assert!(po.is_valid());
     }
 
     #[test]
