@@ -12,7 +12,14 @@
 //! Every non-partial-order construct (sequence, exclusive choice, concurrency, loop, leaf) is
 //! reused as-is from the existing [`process_tree`](crate::core::process_models::case_centric::process_tree)
 //! module rather than duplicated — a [`PowlNode`] is either one of those nodes, or a genuinely
-//! new [`PartialOrderNode`].
+//! new [`PartialOrderNode`]/[`ChoiceGraphNode`].
+//!
+//! Every node also carries a [`Freq`] multiplicity tag (min/max occurrence count), matching the
+//! real reference implementation's `TaggedPOWL.min_freq`/`max_freq` semantics
+//! (`~/POWL/powl/objects/tagged_powl/base.py`), and [`Powl::expand_frequency_tags`] materializes
+//! non-default frequency tags into real choice-graph structure before Petri net compilation --
+//! an independent reimplementation of `~/POWL/powl/objects/tagged_powl/builders.py`'s
+//! `expand_frequency_tags`/`_wrap_frequency_tags`, verified against that source this session.
 
 use std::collections::{BTreeSet, HashSet};
 
@@ -23,6 +30,93 @@ use crate::core::process_models::case_centric::process_tree::Leaf;
 use crate::core::process_models::petri_net::{ArcType, Marking, PlaceID};
 use crate::PetriNet;
 
+mod normalize;
+
+/// A multiplicity/frequency tag on a POWL node: how many times it may occur.
+///
+/// Mirrors the reference implementation's `TaggedPOWL.min_freq`/`max_freq` semantics
+/// (`~/POWL/powl/objects/tagged_powl/base.py:13-30,94-104`): `min_freq` is the minimum
+/// occurrence count (`0` = skippable), `max_freq` is the maximum (`None` = unbounded). The
+/// default, [`Freq::EXACTLY_ONE`], means "occurs exactly once" -- every node in this fork's
+/// prior (pre-frequency-tag) API implicitly had this tag, so adding it is purely additive.
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, Copy, PartialEq, Eq)]
+pub struct Freq {
+    /// Minimum occurrence count. `0` means the node is skippable.
+    pub min_freq: u32,
+    /// Maximum occurrence count. `None` means unbounded.
+    pub max_freq: Option<u32>,
+}
+
+impl Freq {
+    /// The default tag: occurs exactly once.
+    pub const EXACTLY_ONE: Freq = Freq {
+        min_freq: 1,
+        max_freq: Some(1),
+    };
+
+    /// Creates a new frequency tag. `max_freq`, if present, must be `>= min_freq` (checked with
+    /// a debug assertion, mirroring the reference's `_validate_freqs`, which raises `ValueError`
+    /// under the same condition -- kept as a debug assertion here rather than a `Result` because
+    /// every call site in this crate constructs `Freq` from a literal or a value already known
+    /// valid, matching the "only literals and proven-prior-line values" exception for `.unwrap`-
+    /// style invariants).
+    pub fn new(min_freq: u32, max_freq: Option<u32>) -> Self {
+        if let Some(max) = max_freq {
+            debug_assert!(
+                max >= min_freq,
+                "Freq::new: max_freq ({max}) must be >= min_freq ({min_freq})"
+            );
+        }
+        Self { min_freq, max_freq }
+    }
+
+    /// `true` iff this node may be skipped entirely (`min_freq == 0`).
+    pub fn is_skippable(&self) -> bool {
+        self.min_freq == 0
+    }
+
+    /// `true` iff this node may occur more than once (`max_freq` is `None` or `> 1`). Matches
+    /// the reference's `is_repeatable()` exactly, including its notable simplification: a
+    /// finite `max_freq` greater than 1 is treated identically to unbounded for the purpose of
+    /// [`Powl::expand_frequency_tags`] (see that function's docs) -- a real, deliberate
+    /// simplification in the reference, not an approximation introduced here.
+    pub fn is_repeatable(&self) -> bool {
+        self.max_freq.is_none_or(|m| m > 1)
+    }
+
+    /// `true` iff this node has no upper occurrence bound.
+    pub fn is_unbounded(&self) -> bool {
+        self.max_freq.is_none()
+    }
+}
+
+impl Default for Freq {
+    fn default() -> Self {
+        Self::EXACTLY_ONE
+    }
+}
+
+/// A leaf activity carrying a [`Freq`] tag -- the POWL-recursive analogue of
+/// [`process_tree::Leaf`](crate::core::process_models::case_centric::process_tree::Leaf), which
+/// has no frequency concept of its own.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct PowlLeaf {
+    /// The wrapped activity leaf (silent or non-silent), reused from the process tree model.
+    pub leaf: Leaf,
+    /// This leaf's multiplicity tag.
+    pub freq: Freq,
+}
+
+impl PowlLeaf {
+    /// Creates a new leaf with the default (exactly-once) frequency tag.
+    pub fn new(leaf_label: Option<String>) -> Self {
+        Self {
+            leaf: Leaf::new(leaf_label),
+            freq: Freq::EXACTLY_ONE,
+        }
+    }
+}
+
 /// A node in a POWL model: either a block-structured [`process_tree`](crate::core::process_models::case_centric::process_tree)
 /// construct (leaf or operator), a [`PartialOrderNode`] (POWL 1.0's generalization of the
 /// concurrency operator), or a [`ChoiceGraphNode`] (POWL __2.0__'s generalization of the
@@ -31,8 +125,8 @@ use crate::PetriNet;
 /// Aalst, "Hierarchical Decomposition of Separable Workflow-Nets", Def. 3.6-3.9).
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub enum PowlNode {
-    /// A non-silent or silent activity leaf, reused from the process tree model.
-    Leaf(Leaf),
+    /// A non-silent or silent activity leaf, carrying its own [`Freq`] tag.
+    Leaf(PowlLeaf),
     /// A block-structured operator (Sequence/ExclusiveChoice/Concurrency/Loop) over POWL
     /// children, reused from the process tree model but recursing into [`PowlNode`] rather than
     /// `process_tree::Node`.
@@ -45,14 +139,40 @@ pub enum PowlNode {
 }
 
 impl PowlNode {
-    /// Creates a new non-silent or silent leaf node.
+    /// Creates a new non-silent or silent leaf node with the default (exactly-once) frequency.
     pub fn new_leaf(leaf_label: Option<String>) -> Self {
-        PowlNode::Leaf(Leaf::new(leaf_label))
+        PowlNode::Leaf(PowlLeaf::new(leaf_label))
+    }
+
+    /// Returns this node's [`Freq`] multiplicity tag.
+    pub fn freq(&self) -> Freq {
+        match self {
+            PowlNode::Leaf(leaf) => leaf.freq,
+            PowlNode::Operator(op) => op.freq,
+            PowlNode::PartialOrder(po) => po.freq,
+            PowlNode::ChoiceGraph(cg) => cg.freq,
+        }
+    }
+
+    /// Sets this node's [`Freq`] multiplicity tag in place.
+    pub fn set_freq(&mut self, freq: Freq) {
+        match self {
+            PowlNode::Leaf(leaf) => leaf.freq = freq,
+            PowlNode::Operator(op) => op.freq = freq,
+            PowlNode::PartialOrder(po) => po.freq = freq,
+            PowlNode::ChoiceGraph(cg) => cg.freq = freq,
+        }
     }
 
     /// Unfolds this node and its descendants into places, transitions, and arcs, adding them to
     /// the given [`PetriNet`]. Mirrors
     /// [`process_tree::Node::add_to_petri_net`](crate::core::process_models::case_centric::process_tree::Node::add_to_petri_net).
+    ///
+    /// Does NOT itself apply skip/repeat semantics for a non-default [`Freq`] -- callers that
+    /// need that must call [`Powl::expand_frequency_tags`] first, exactly as the reference's
+    /// `apply()` calls `expand_frequency_tags` before compiling to a Petri net
+    /// (`~/POWL/powl/conversion/variants/to_petri_net.py:201-205`). [`Powl::to_petri_net`] does
+    /// this automatically.
     pub fn add_to_petri_net(
         &self,
         net: &mut PetriNet,
@@ -60,21 +180,21 @@ impl PowlNode {
         out_place: Option<PlaceID>,
     ) -> (PlaceID, PlaceID) {
         match self {
-            PowlNode::Leaf(leaf) => leaf.add_to_petri_net(net, in_place, out_place),
+            PowlNode::Leaf(leaf) => leaf.leaf.add_to_petri_net(net, in_place, out_place),
             PowlNode::Operator(op) => op.add_to_petri_net(net, in_place, out_place),
             PowlNode::PartialOrder(po) => po.add_to_petri_net(net, in_place, out_place),
             PowlNode::ChoiceGraph(cg) => cg.add_to_petri_net(net, in_place, out_place),
         }
     }
 
-    /// Returns all descendant [`Leaf`]s (including `self` if it is a leaf).
-    pub fn find_all_leaves(&self) -> Vec<&Leaf> {
+    /// Returns all descendant [`PowlLeaf`]s (including `self` if it is a leaf).
+    pub fn find_all_leaves(&self) -> Vec<&PowlLeaf> {
         let mut result = Vec::new();
         self.collect_leaves(&mut result);
         result
     }
 
-    fn collect_leaves<'a>(&'a self, out: &mut Vec<&'a Leaf>) {
+    fn collect_leaves<'a>(&'a self, out: &mut Vec<&'a PowlLeaf>) {
         match self {
             PowlNode::Leaf(leaf) => out.push(leaf),
             PowlNode::Operator(op) => op.children.iter().for_each(|c| c.collect_leaves(out)),
@@ -85,27 +205,31 @@ impl PowlNode {
 }
 
 /// A block-structured operator over [`PowlNode`] children (the POWL-recursive analogue of
-/// [`process_tree::Operator`](crate::core::process_models::case_centric::process_tree::Operator)).
+/// [`process_tree::Operator`](crate::core::process_models::case_centric::process_tree::Operator)),
+/// carrying its own [`Freq`] tag.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct PowlOperator {
     /// The block-structured operator's [`process_tree::OperatorType`](crate::core::process_models::case_centric::process_tree::OperatorType), reused as-is.
     pub operator_type: crate::core::process_models::case_centric::process_tree::OperatorType,
     /// The children of the operator node.
     pub children: Vec<PowlNode>,
+    /// This operator's multiplicity tag.
+    pub freq: Freq,
 }
 
 impl PowlOperator {
-    /// Creates a new, childless operator of the given type.
+    /// Creates a new, childless operator of the given type with the default frequency tag.
     pub fn new(operator_type: crate::core::process_models::case_centric::process_tree::OperatorType) -> Self {
         Self {
             operator_type,
             children: Vec::new(),
+            freq: Freq::EXACTLY_ONE,
         }
     }
 
     /// Same translation rules as [`process_tree::Operator::add_to_petri_net`](crate::core::process_models::case_centric::process_tree::Operator::add_to_petri_net),
-    /// reimplemented over [`PowlNode`] children so a `PartialOrder` sub-node can appear as an
-    /// operator's child.
+    /// reimplemented over [`PowlNode`] children so a `PartialOrder`/`ChoiceGraph` sub-node can
+    /// appear as an operator's child.
     pub fn add_to_petri_net(
         &self,
         net: &mut PetriNet,
@@ -178,7 +302,7 @@ impl PowlOperator {
 }
 
 /// A partially-ordered set of [`PowlNode`] children (POWL's genuinely new construct beyond a
-/// block-structured process tree).
+/// block-structured process tree), carrying its own [`Freq`] tag.
 ///
 /// `order` holds strict "must happen before" edges as `(from_index, to_index)` pairs into
 /// `children`. Two children with no edge between them in either direction are unordered: both
@@ -190,11 +314,14 @@ pub struct PartialOrderNode {
     pub children: Vec<PowlNode>,
     /// Strict order edges `(from_index, to_index)` into `children`, transitively closed.
     pub order: BTreeSet<(usize, usize)>,
+    /// This partial order's multiplicity tag.
+    pub freq: Freq,
 }
 
 impl PartialOrderNode {
     /// Creates a new [`PartialOrderNode`] from children and a (not necessarily transitively
-    /// closed) set of order edges; the edges are transitively closed on construction.
+    /// closed) set of order edges; the edges are transitively closed on construction. The
+    /// frequency tag defaults to exactly-once; set `.freq` directly to change it.
     pub fn new(children: Vec<PowlNode>, order: impl IntoIterator<Item = (usize, usize)>) -> Self {
         let n = children.len();
         let mut closed: BTreeSet<(usize, usize)> = order.into_iter().collect();
@@ -219,6 +346,7 @@ impl PartialOrderNode {
         Self {
             children,
             order: closed,
+            freq: Freq::EXACTLY_ONE,
         }
     }
 
@@ -343,12 +471,15 @@ pub struct ChoiceGraphNode {
     /// required to be acyclic or transitively closed -- a choice graph is a plain directed graph,
     /// not a partial order.
     pub edges: BTreeSet<(ChoiceGraphEndpoint, ChoiceGraphEndpoint)>,
+    /// This choice graph's multiplicity tag.
+    pub freq: Freq,
 }
 
 impl ChoiceGraphNode {
     /// Creates a new [`ChoiceGraphNode`] from children and a set of edges over
-    /// [`ChoiceGraphEndpoint`]s. Edges are taken as given -- unlike [`PartialOrderNode::new`],
-    /// no transitive closure is computed, since a choice graph is not a partial order.
+    /// [`ChoiceGraphEndpoint`]s, with the default (exactly-once) frequency tag. Edges are taken
+    /// as given -- unlike [`PartialOrderNode::new`], no transitive closure is computed, since a
+    /// choice graph is not a partial order.
     pub fn new(
         children: Vec<PowlNode>,
         edges: impl IntoIterator<Item = (ChoiceGraphEndpoint, ChoiceGraphEndpoint)>,
@@ -356,6 +487,7 @@ impl ChoiceGraphNode {
         Self {
             children,
             edges: edges.into_iter().collect(),
+            freq: Freq::EXACTLY_ONE,
         }
     }
 
@@ -368,6 +500,35 @@ impl ChoiceGraphNode {
         Self::new(
             vec![child],
             [(Start, Child(0)), (Child(0), Child(0)), (Child(0), End)],
+        )
+    }
+
+    /// Convenience constructor for a plain exclusive choice among `children` expressed as a
+    /// choice graph: every child is both a start node and an end node, with no edges between
+    /// children. Mirrors the reference's `xor()` builder
+    /// (`~/POWL/powl/objects/tagged_powl/builders.py:30-43`).
+    pub fn exclusive_choice(children: Vec<PowlNode>) -> Self {
+        use ChoiceGraphEndpoint::{Child, End, Start};
+        let n = children.len();
+        let edges = (0..n).flat_map(|i| [(Start, Child(i)), (Child(i), End)]);
+        Self::new(children, edges)
+    }
+
+    /// Convenience constructor for a general two-node do/redo loop: `do` executes first, then
+    /// zero or more `do, redo` repetitions. Mirrors the reference's `loop()` builder
+    /// (`~/POWL/powl/objects/tagged_powl/builders.py:46-60`); `do` is `Child(0)`, `redo` is
+    /// `Child(1)`. Used by [`Powl::expand_frequency_tags`] to materialize a repeatable node's
+    /// multiplicity.
+    pub fn do_redo_loop(do_part: PowlNode, redo_part: PowlNode) -> Self {
+        use ChoiceGraphEndpoint::{Child, End, Start};
+        Self::new(
+            vec![do_part, redo_part],
+            [
+                (Start, Child(0)),
+                (Child(0), End),
+                (Child(0), Child(1)),
+                (Child(1), Child(0)),
+            ],
         )
     }
 
@@ -487,23 +648,133 @@ impl Powl {
         Self { root }
     }
 
-    /// Returns all descendant [`Leaf`]s of the model.
-    pub fn find_all_leaves(&self) -> Vec<&Leaf> {
+    /// Returns all descendant [`PowlLeaf`]s of the model.
+    pub fn find_all_leaves(&self) -> Vec<&PowlLeaf> {
         self.root.find_all_leaves()
+    }
+
+    /// Materializes every node's [`Freq`] tag into real choice-graph structure, returning a new
+    /// [`Powl`] model where every node has the default (exactly-once) frequency.
+    ///
+    /// An independent reimplementation of the reference's `expand_frequency_tags`/
+    /// `_wrap_frequency_tags` (`~/POWL/powl/objects/tagged_powl/builders.py:63-113`), verified
+    /// against that source this session. For a node `N` with a non-default `Freq` tag, the body
+    /// `N` (recursively expanded first, with its own tag reset to exactly-one) is wrapped as:
+    ///
+    /// - skippable AND repeatable (`min_freq == 0`, `is_repeatable() == true`): a do/redo loop
+    ///   whose do-part is silent and whose redo-part is the body -- the graph can skip straight
+    ///   through, or loop the body zero or more times.
+    /// - repeatable only (`is_repeatable() == true`, not skippable): a do/redo loop whose
+    ///   do-part is the body and whose redo-part is silent -- the body occurs one or more times.
+    /// - skippable only (`min_freq == 0`, not repeatable): a plain exclusive choice between the
+    ///   body and a silent activity -- occurs zero or one times.
+    /// - neither: the body is returned unchanged.
+    ///
+    /// Note the same simplification the reference makes (see [`Freq::is_repeatable`]'s docs): a
+    /// finite `max_freq > 1` is expanded identically to an unbounded one, via a graph cycle
+    /// rather than a bounded unrolling -- this is the real reference algorithm's behavior, not
+    /// an approximation introduced here.
+    pub fn expand_frequency_tags(&self) -> Powl {
+        Powl::new(expand_node(&self.root))
     }
 
     /// Translates the model into a workflow net (a [`PetriNet`] with a single initial and final
     /// marking), the same shape
     /// [`process_tree::ProcessTree::to_petri_net`](crate::core::process_models::case_centric::process_tree::ProcessTree::to_petri_net)
-    /// produces.
+    /// produces. Frequency tags are expanded first (see [`Powl::expand_frequency_tags`]),
+    /// matching the reference's `apply()`
+    /// (`~/POWL/powl/conversion/variants/to_petri_net.py:201-205`), so a skippable or repeatable
+    /// node's multiplicity is faithfully represented in the exported net.
     pub fn to_petri_net(&self) -> PetriNet {
+        let expanded = self.expand_frequency_tags();
         let mut net = PetriNet::new();
-        let (start, end) = self.root.add_to_petri_net(&mut net, None, None);
+        let (start, end) = expanded.root.add_to_petri_net(&mut net, None, None);
         net.initial_marking = Some(Marking::from([(start, 1)]));
         let mut final_marking = Marking::new();
         final_marking.insert(end, 1);
         net.final_markings = Some(vec![final_marking]);
         net
+    }
+}
+
+/// Recursively expands one [`PowlNode`]'s frequency tag; the free function backing
+/// [`Powl::expand_frequency_tags`] (kept as a standalone recursive helper since it must recurse
+/// into every node kind uniformly, independent of which `Powl` it started from).
+fn expand_node(node: &PowlNode) -> PowlNode {
+    let freq = node.freq();
+
+    // Recursively expand this node's own children first, with its own tag reset to
+    // exactly-one -- matches the reference's structure exactly: `body.min_freq = 1;
+    // body.max_freq = 1` before `_wrap_frequency_tags(body, model)`.
+    let mut body = match node {
+        PowlNode::Leaf(leaf) => PowlNode::Leaf(PowlLeaf {
+            leaf: Leaf::new(match &leaf.leaf.activity_label {
+                crate::core::process_models::case_centric::process_tree::LeafLabel::Activity(a) => {
+                    Some(a.clone())
+                }
+                crate::core::process_models::case_centric::process_tree::LeafLabel::Tau => None,
+            }),
+            freq: Freq::EXACTLY_ONE,
+        }),
+        PowlNode::Operator(op) => {
+            let mut new_op = PowlOperator::new(op.operator_type_clone());
+            new_op.children = op.children.iter().map(expand_node).collect();
+            PowlNode::Operator(new_op)
+        }
+        PowlNode::PartialOrder(po) => {
+            let mut new_po =
+                PartialOrderNode::new(po.children.iter().map(expand_node).collect(), po.order.iter().copied());
+            new_po.freq = Freq::EXACTLY_ONE;
+            PowlNode::PartialOrder(new_po)
+        }
+        PowlNode::ChoiceGraph(cg) => {
+            let mut new_cg = ChoiceGraphNode::new(
+                cg.children.iter().map(expand_node).collect(),
+                cg.edges.iter().copied(),
+            );
+            new_cg.freq = Freq::EXACTLY_ONE;
+            PowlNode::ChoiceGraph(new_cg)
+        }
+    };
+    body.set_freq(Freq::EXACTLY_ONE);
+
+    if freq.is_repeatable() {
+        if freq.is_skippable() {
+            // Zero or more: loop(silent, body).
+            PowlNode::ChoiceGraph(ChoiceGraphNode::do_redo_loop(
+                PowlNode::new_leaf(None),
+                body,
+            ))
+        } else {
+            // One or more: loop(body, silent).
+            PowlNode::ChoiceGraph(ChoiceGraphNode::do_redo_loop(
+                body,
+                PowlNode::new_leaf(None),
+            ))
+        }
+    } else if freq.is_skippable() {
+        // Zero or one: xor(body, silent).
+        PowlNode::ChoiceGraph(ChoiceGraphNode::exclusive_choice(vec![
+            body,
+            PowlNode::new_leaf(None),
+        ]))
+    } else {
+        body
+    }
+}
+
+impl PowlOperator {
+    /// Clones just this operator's [`process_tree::OperatorType`](crate::core::process_models::case_centric::process_tree::OperatorType)
+    /// (which does not itself implement `Clone`); a small helper for
+    /// [`Powl::expand_frequency_tags`]'s recursion.
+    fn operator_type_clone(&self) -> crate::core::process_models::case_centric::process_tree::OperatorType {
+        use crate::core::process_models::case_centric::process_tree::OperatorType;
+        match self.operator_type {
+            OperatorType::Sequence => OperatorType::Sequence,
+            OperatorType::ExclusiveChoice => OperatorType::ExclusiveChoice,
+            OperatorType::Concurrency => OperatorType::Concurrency,
+            OperatorType::Loop => OperatorType::Loop,
+        }
     }
 }
 
@@ -577,19 +848,10 @@ mod tests {
         // construct). This is the direct positive counterpart of
         // `choice_graph_rejects_unreachable_node` below -- same two-child branching shape,
         // but with both children actually reachable.
-        use ChoiceGraphEndpoint::{Child, End, Start};
-        let exclusive_choice = ChoiceGraphNode::new(
-            vec![
-                PowlNode::new_leaf(Some("a".into())),
-                PowlNode::new_leaf(Some("b".into())),
-            ],
-            [
-                (Start, Child(0)),
-                (Child(0), End),
-                (Start, Child(1)),
-                (Child(1), End),
-            ],
-        );
+        let exclusive_choice = ChoiceGraphNode::exclusive_choice(vec![
+            PowlNode::new_leaf(Some("a".into())),
+            PowlNode::new_leaf(Some("b".into())),
+        ]);
         assert!(exclusive_choice.is_valid());
     }
 
@@ -616,5 +878,357 @@ mod tests {
         // 1 real "a" transition + at least the do/redo/exit silent transitions.
         assert!(net.transitions.len() >= 2);
         assert!(net.initial_marking.is_some());
+    }
+
+    #[test]
+    fn default_freq_is_exactly_one_and_expansion_is_a_no_op() {
+        // Every node built through this crate's constructors defaults to Freq::EXACTLY_ONE, so
+        // expand_frequency_tags must be a structural no-op for the existing (pre-frequency-tag)
+        // test suite above -- backward compatibility, checked for real rather than assumed.
+        let leaf = PowlNode::new_leaf(Some("a".into()));
+        assert_eq!(leaf.freq(), Freq::EXACTLY_ONE);
+        assert!(!leaf.freq().is_skippable());
+        assert!(!leaf.freq().is_repeatable());
+
+        let model = Powl::new(leaf);
+        let expanded = model.expand_frequency_tags();
+        // Still a plain Leaf, not wrapped in a ChoiceGraph -- exactly-one needs no wrapping.
+        assert!(matches!(expanded.root, PowlNode::Leaf(_)));
+    }
+
+    #[test]
+    fn skippable_and_repeatable_leaf_expands_to_a_zero_or_more_choice_graph() {
+        let mut leaf = PowlNode::new_leaf(Some("a".into()));
+        leaf.set_freq(Freq::new(0, None)); // zero or more
+        assert!(leaf.freq().is_skippable());
+        assert!(leaf.freq().is_repeatable());
+
+        let expanded = Powl::new(leaf).expand_frequency_tags();
+        let PowlNode::ChoiceGraph(cg) = &expanded.root else {
+            panic!("expected a ChoiceGraph wrapper for a skippable+repeatable node");
+        };
+        assert!(cg.is_valid());
+        // do/redo loop: 2 children (silent do-part, the real body as redo-part).
+        assert_eq!(cg.children.len(), 2);
+        assert!(matches!(cg.children[1], PowlNode::Leaf(_)));
+
+        // The expanded model must compile to a real, valid workflow net.
+        let net = expanded.to_petri_net();
+        assert!(net.initial_marking.is_some());
+    }
+
+    #[test]
+    fn repeatable_only_leaf_expands_to_a_one_or_more_choice_graph() {
+        let mut leaf = PowlNode::new_leaf(Some("a".into()));
+        leaf.set_freq(Freq::new(1, None)); // one or more, not skippable
+        let expanded = Powl::new(leaf).expand_frequency_tags();
+        let PowlNode::ChoiceGraph(cg) = &expanded.root else {
+            panic!("expected a ChoiceGraph wrapper for a repeatable-only node");
+        };
+        assert!(cg.is_valid());
+        // do/redo loop: do-part is the real body (not silent), redo-part is silent.
+        assert!(matches!(cg.children[0], PowlNode::Leaf(_)));
+    }
+
+    #[test]
+    fn skippable_only_leaf_expands_to_a_zero_or_one_exclusive_choice() {
+        let mut leaf = PowlNode::new_leaf(Some("a".into()));
+        leaf.set_freq(Freq::new(0, Some(1))); // zero or one
+        let expanded = Powl::new(leaf).expand_frequency_tags();
+        let PowlNode::ChoiceGraph(cg) = &expanded.root else {
+            panic!("expected a ChoiceGraph wrapper for a skippable-only node");
+        };
+        assert!(cg.is_valid());
+        assert_eq!(cg.children.len(), 2);
+        // No cyclic edge -- this is a plain either/or, not a loop.
+        assert!(!cg
+            .edges
+            .contains(&(ChoiceGraphEndpoint::Child(0), ChoiceGraphEndpoint::Child(0))));
+    }
+
+    // -- Powl::normalize -----------------------------------------------------------------
+
+    /// Extracts the activity label of a plain (non-silent) leaf, panicking otherwise -- a small
+    /// assertion helper for the tests below.
+    fn leaf_label(node: &PowlNode) -> &str {
+        let PowlNode::Leaf(leaf) = node else {
+            panic!("expected a Leaf node, got {node:?}");
+        };
+        let crate::core::process_models::case_centric::process_tree::LeafLabel::Activity(label) =
+            &leaf.leaf.activity_label
+        else {
+            panic!("expected a non-silent leaf, got {node:?}");
+        };
+        label.as_str()
+    }
+
+    #[test]
+    fn normalize_is_a_no_op_on_an_already_minimal_choice_graph() {
+        // A plain exclusive choice between two real activities has no redundant silent nodes,
+        // no skippable-marking opportunity (no direct Start->End edge), and no sequential cut
+        // point (removing either child still leaves the other's path intact) -- normalize must
+        // leave it structurally unchanged.
+        let cg = ChoiceGraphNode::exclusive_choice(vec![
+            PowlNode::new_leaf(Some("a".into())),
+            PowlNode::new_leaf(Some("b".into())),
+        ]);
+        let model = Powl::new(PowlNode::ChoiceGraph(cg));
+        let normalized = model.normalize();
+
+        let PowlNode::ChoiceGraph(result) = &normalized.root else {
+            panic!("expected the result to still be a ChoiceGraph");
+        };
+        assert!(result.is_valid());
+        assert_eq!(result.children.len(), 2);
+        let mut labels: Vec<&str> = result.children.iter().map(leaf_label).collect();
+        labels.sort();
+        assert_eq!(labels, vec!["a", "b"]);
+        // Neither child was marked skippable -- there was no redundant direct edge to justify it.
+        assert!(result.children.iter().all(|c| c.freq() == Freq::EXACTLY_ONE));
+    }
+
+    #[test]
+    fn normalize_bypasses_a_redundant_silent_node_in_a_choice_graph() {
+        // Start -[tau]-> a -> End, plus a genuinely separate Start -> b -> End branch. The tau
+        // has exactly one predecessor (Start) and one successor (a), so it must be bypassed,
+        // wiring Start directly to a and dropping the tau node entirely.
+        use ChoiceGraphEndpoint::{Child, End, Start};
+        let children = vec![
+            PowlNode::new_leaf(None),          // 0: tau
+            PowlNode::new_leaf(Some("a".into())), // 1
+            PowlNode::new_leaf(Some("b".into())), // 2
+        ];
+        let cg = ChoiceGraphNode::new(
+            children,
+            [
+                (Start, Child(0)),
+                (Child(0), Child(1)),
+                (Child(1), End),
+                (Start, Child(2)),
+                (Child(2), End),
+            ],
+        );
+        assert_eq!(cg.children.len(), 3, "sanity: 3 nodes (tau, a, b) before normalize");
+
+        let model = Powl::new(PowlNode::ChoiceGraph(cg));
+        let normalized = model.normalize();
+
+        let PowlNode::ChoiceGraph(result) = &normalized.root else {
+            panic!("expected the result to still be a ChoiceGraph");
+        };
+        assert!(result.is_valid());
+        // The tau is gone: only "a" and "b" remain -- a real, verifiable node-count reduction.
+        assert_eq!(result.children.len(), 2);
+        let mut labels: Vec<&str> = result.children.iter().map(leaf_label).collect();
+        labels.sort();
+        assert_eq!(labels, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn normalize_marks_a_redundant_direct_choice_as_skippable() {
+        // Start -> a -> End, plus a direct Start -> End edge: "a" can always be bypassed
+        // entirely, so the reduction must mark it skippable and drop the now-redundant direct
+        // edge -- collapsing the whole graph down to a bare skippable "a" leaf.
+        use ChoiceGraphEndpoint::{Child, End, Start};
+        let cg = ChoiceGraphNode::new(
+            vec![PowlNode::new_leaf(Some("a".into()))],
+            [(Start, Child(0)), (Child(0), End), (Start, End)],
+        );
+        let model = Powl::new(PowlNode::ChoiceGraph(cg));
+        let normalized = model.normalize();
+
+        assert_eq!(leaf_label(&normalized.root), "a");
+        assert_eq!(normalized.root.freq(), Freq::new(0, Some(1)));
+    }
+
+    #[test]
+    fn normalize_collapses_a_skippable_and_repeatable_expansion_round_trip() {
+        // expand_frequency_tags(zero-or-more "a") wraps "a" in a do/redo ChoiceGraph; normalize
+        // must be its real structural inverse, recovering a bare "a" leaf with the original tag.
+        let mut leaf = PowlNode::new_leaf(Some("a".into()));
+        leaf.set_freq(Freq::new(0, None));
+        let expanded = Powl::new(leaf).expand_frequency_tags();
+        assert!(matches!(expanded.root, PowlNode::ChoiceGraph(_)));
+
+        let normalized = expanded.normalize();
+        assert_eq!(leaf_label(&normalized.root), "a");
+        assert_eq!(normalized.root.freq(), Freq::new(0, None));
+    }
+
+    #[test]
+    fn normalize_collapses_a_repeatable_only_expansion_round_trip() {
+        let mut leaf = PowlNode::new_leaf(Some("a".into()));
+        leaf.set_freq(Freq::new(1, None));
+        let expanded = Powl::new(leaf).expand_frequency_tags();
+
+        let normalized = expanded.normalize();
+        assert_eq!(leaf_label(&normalized.root), "a");
+        assert_eq!(normalized.root.freq(), Freq::new(1, None));
+    }
+
+    #[test]
+    fn normalize_collapses_a_raw_self_looping_choice_graph() {
+        // ChoiceGraphNode::self_looping's own genuine Child(0)->Child(0) cyclic edge (not
+        // routed through a silent node) must collapse to a bare unbounded-repeatable leaf.
+        let cg = ChoiceGraphNode::self_looping(PowlNode::new_leaf(Some("a".into())));
+        let model = Powl::new(PowlNode::ChoiceGraph(cg));
+        let normalized = model.normalize();
+
+        assert_eq!(leaf_label(&normalized.root), "a");
+        let freq = normalized.root.freq();
+        assert_eq!(freq.min_freq, 1);
+        assert_eq!(freq.max_freq, None);
+    }
+
+    #[test]
+    fn normalize_chunks_a_two_stage_choice_graph_into_a_partial_order() {
+        // Start -> a -> {c, d} -> End: "a" always happens first (a genuine sequential cut
+        // point), then an exclusive choice between "c" and "d" -- two real sequential stages
+        // with no cross-cutting cycle.
+        use ChoiceGraphEndpoint::{Child, End, Start};
+        let children = vec![
+            PowlNode::new_leaf(Some("a".into())), // 0
+            PowlNode::new_leaf(Some("c".into())), // 1
+            PowlNode::new_leaf(Some("d".into())), // 2
+        ];
+        let cg = ChoiceGraphNode::new(
+            children,
+            [
+                (Start, Child(0)),
+                (Child(0), Child(1)),
+                (Child(0), Child(2)),
+                (Child(1), End),
+                (Child(2), End),
+            ],
+        );
+        let model = Powl::new(PowlNode::ChoiceGraph(cg));
+        let normalized = model.normalize();
+
+        let PowlNode::PartialOrder(po) = &normalized.root else {
+            panic!("expected a two-stage sequential ChoiceGraph to normalize into a PartialOrder, got {:?}", normalized.root);
+        };
+        assert_eq!(po.children.len(), 2, "exactly two sequential stages/chunks");
+        assert_eq!(leaf_label(&po.children[0]), "a");
+        let PowlNode::ChoiceGraph(stage2) = &po.children[1] else {
+            panic!("expected the second stage to still be a ChoiceGraph (c XOR d), got {:?}", po.children[1]);
+        };
+        assert!(stage2.is_valid());
+        let mut stage2_labels: Vec<&str> = stage2.children.iter().map(leaf_label).collect();
+        stage2_labels.sort();
+        assert_eq!(stage2_labels, vec!["c", "d"]);
+        assert!(po.order.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn normalize_abstracts_a_nested_scc_loop_within_a_larger_sequence() {
+        // Start -> a -> x <-> y -> b -> End: {x, y} is a genuine 2-node strongly connected
+        // component with a clean single entry (x, from a) / single exit (y, to b) boundary,
+        // nested inside an otherwise-acyclic 3-stage sequence. Exercises SCC abstraction (via
+        // petgraph::algo::tarjan_scc), the nested self-loop collapse inside that SCC, and outer
+        // sequence chunking, all together.
+        use ChoiceGraphEndpoint::{Child, End, Start};
+        let children = vec![
+            PowlNode::new_leaf(Some("a".into())), // 0
+            PowlNode::new_leaf(Some("x".into())), // 1
+            PowlNode::new_leaf(Some("y".into())), // 2
+            PowlNode::new_leaf(Some("b".into())), // 3
+        ];
+        let cg = ChoiceGraphNode::new(
+            children,
+            [
+                (Start, Child(0)),
+                (Child(0), Child(1)),
+                (Child(1), Child(2)),
+                (Child(2), Child(1)), // the back-edge closing the {x, y} cycle
+                (Child(2), Child(3)),
+                (Child(3), End),
+            ],
+        );
+        let model = Powl::new(PowlNode::ChoiceGraph(cg));
+        let normalized = model.normalize();
+
+        let PowlNode::PartialOrder(po) = &normalized.root else {
+            panic!("expected a PartialOrder of 3 sequential stages, got {:?}", normalized.root);
+        };
+        assert_eq!(po.children.len(), 3);
+        assert_eq!(leaf_label(&po.children[0]), "a");
+        assert_eq!(leaf_label(&po.children[2]), "b");
+
+        let PowlNode::PartialOrder(inner) = &po.children[1] else {
+            panic!("expected the middle stage to be the abstracted {{x, y}} loop, got {:?}", po.children[1]);
+        };
+        assert_eq!(inner.children.len(), 2);
+        let mut inner_labels: Vec<&str> = inner.children.iter().map(leaf_label).collect();
+        inner_labels.sort();
+        assert_eq!(inner_labels, vec!["x", "y"]);
+        // The {x, y} cycle was correctly recognized as "repeats one or more times", not skippable.
+        assert_eq!(inner.freq.min_freq, 1);
+        assert_eq!(inner.freq.max_freq, None);
+
+        assert!(po.order.contains(&(0, 1)));
+        assert!(po.order.contains(&(1, 2)));
+    }
+
+    #[test]
+    fn normalize_partial_order_bypasses_a_silent_child_and_reindexes() {
+        // a -> tau -> b: tau has exactly one direct predecessor and one direct successor (using
+        // the DIRECT, non-transitively-implied edges -- not po.order's transitive closure, which
+        // would otherwise make "a" look like a second predecessor of "b").
+        let children = vec![
+            PowlNode::new_leaf(Some("a".into())),
+            PowlNode::new_leaf(None),
+            PowlNode::new_leaf(Some("b".into())),
+        ];
+        let po = PartialOrderNode::new(children, [(0, 1), (1, 2)]);
+        let model = Powl::new(PowlNode::PartialOrder(po));
+        let normalized = model.normalize();
+
+        let PowlNode::PartialOrder(result) = &normalized.root else {
+            panic!("expected the result to still be a PartialOrder, got {:?}", normalized.root);
+        };
+        assert_eq!(result.children.len(), 2, "the silent bypass node must be gone");
+        assert_eq!(leaf_label(&result.children[0]), "a");
+        assert_eq!(leaf_label(&result.children[1]), "b");
+        assert!(result.order.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn normalize_partial_order_flattens_to_a_single_child() {
+        // a -> tau (tau has no successor at all -- trivially <=1 -- so it is bypassed away),
+        // leaving a single child: the whole PartialOrder wrapper must flatten to a bare "a" leaf.
+        let children = vec![PowlNode::new_leaf(Some("a".into())), PowlNode::new_leaf(None)];
+        let po = PartialOrderNode::new(children, [(0, 1)]);
+        let model = Powl::new(PowlNode::PartialOrder(po));
+        let normalized = model.normalize();
+
+        assert_eq!(leaf_label(&normalized.root), "a");
+        assert_eq!(normalized.root.freq(), Freq::EXACTLY_ONE);
+    }
+
+    #[test]
+    fn normalize_operator_recurses_into_its_children() {
+        // Sequence(a, ChoiceGraph-with-a-redundant-tau): the Operator itself must survive
+        // unchanged in kind, but its second child must come back reduced.
+        use ChoiceGraphEndpoint::{Child, End, Start};
+        let inner_children = vec![PowlNode::new_leaf(None), PowlNode::new_leaf(Some("b".into()))];
+        let inner_cg = ChoiceGraphNode::new(
+            inner_children,
+            [(Start, Child(0)), (Child(0), Child(1)), (Child(1), End)],
+        );
+
+        let mut op = PowlOperator::new(OperatorType::Sequence);
+        op.children.push(PowlNode::new_leaf(Some("a".into())));
+        op.children.push(PowlNode::ChoiceGraph(inner_cg));
+        let model = Powl::new(PowlNode::Operator(op));
+        let normalized = model.normalize();
+
+        let PowlNode::Operator(result) = &normalized.root else {
+            panic!("expected an Operator node, got {:?}", normalized.root);
+        };
+        assert!(matches!(result.operator_type, OperatorType::Sequence));
+        assert_eq!(result.children.len(), 2);
+        assert_eq!(leaf_label(&result.children[0]), "a");
+        // The nested ChoiceGraph's redundant tau bypass must have collapsed it to a bare "b" leaf.
+        assert_eq!(leaf_label(&result.children[1]), "b");
     }
 }
