@@ -30,6 +30,7 @@ use crate::core::process_models::case_centric::process_tree::Leaf;
 use crate::core::process_models::petri_net::{ArcType, Marking, PlaceID};
 use crate::PetriNet;
 
+pub mod bpmn;
 mod normalize;
 
 /// A multiplicity/frequency tag on a POWL node: how many times it may occur.
