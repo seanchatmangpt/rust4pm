@@ -2,6 +2,8 @@
 
 pub use chrono;
 pub mod event_data;
+/// DfCM-compatible economic ISA wire boundary for process evidence.
+pub mod economic_isa;
 
 /// IO Traits
 pub mod io;
